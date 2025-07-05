@@ -42,6 +42,25 @@ class ReportThread(QThread):
             tb = traceback.format_exc()
             self.log_signal.emit(f"发生错误: {e}\n{tb}")
 
+class SupplementReportThread(QThread):
+    log_signal = pyqtSignal(str)
+    done_signal = pyqtSignal(str)
+    def __init__(self, main_folder, supplement_folder, report_path, hash_method):
+        super().__init__()
+        self.main_folder = main_folder
+        self.supplement_folder = supplement_folder
+        self.report_path = report_path
+        self.hash_method = hash_method
+    def run(self):
+        try:
+            self.log_signal.emit(f"开始生成增补报告...\n")
+            compare.supplement_images(self.main_folder, self.supplement_folder, self.report_path, self.hash_method, dry_run=False)
+            self.log_signal.emit(f"增补报告生成完成: {self.report_path}\n")
+            self.done_signal.emit(self.report_path)
+        except Exception as e:
+            tb = traceback.format_exc()
+            self.log_signal.emit(f"发生错误: {e}\n{tb}")
+
 class ClickableLabel(QLabel):
     def __init__(self, path, parent=None):
         super().__init__(parent)
@@ -91,6 +110,8 @@ class DedupGui(QWidget):
         btn_layout = QHBoxLayout()
         self.btn_generate_report = QPushButton('生成去重报告')
         self.btn_generate_report.clicked.connect(self.generate_report_dialog)
+        self.btn_generate_supp_report = QPushButton('生成增补报告')
+        self.btn_generate_supp_report.clicked.connect(self.generate_supp_report_dialog)
         self.btn_load = QPushButton('加载报告')
         self.btn_load.clicked.connect(self.load_report)
         self.btn_export = QPushButton('导出删除清单')
@@ -105,6 +126,7 @@ class DedupGui(QWidget):
         self.combo_strategy.addItems(['保留第一个', '保留最新', '保留最大'])
         self.combo_strategy.currentIndexChanged.connect(self.apply_strategy)
         btn_layout.addWidget(self.btn_generate_report)
+        btn_layout.addWidget(self.btn_generate_supp_report)
         btn_layout.addWidget(self.btn_load)
         btn_layout.addWidget(self.btn_export)
         btn_layout.addWidget(self.btn_delete)
@@ -535,7 +557,6 @@ class DedupGui(QWidget):
             l = line.rstrip('\r\n')
             if l.startswith('成功增补') and '图片' in l:
                 mode = 'img'
-                # 提取目标目录
                 m = re.search(r'到: (.+)$', l)
                 if m:
                     self.supplement_img_target_dir = m.group(1).strip()
@@ -549,7 +570,8 @@ class DedupGui(QWidget):
             if l.startswith('已存在') or l.strip() == '' or l.startswith('[DRY-RUN]') or l.startswith('增补图片报告'):
                 mode = None
                 continue
-            if re.search(r'[A-Za-z]:\\', l):
+            # 兼容 D:/ 和 D:\ 路径
+            if re.search(r'[A-Za-z]:[\\/]', l):
                 if mode == 'img':
                     self.supplement_img_files.append(l.strip())
                 elif mode == 'vid':
@@ -611,6 +633,27 @@ class DedupGui(QWidget):
         self.thread.log_signal.connect(self.log_box.append)
         self.thread.done_signal.connect(self.on_report_done)
         self.thread.start()
+
+    def generate_supp_report_dialog(self):
+        main_folder = QFileDialog.getExistingDirectory(self, '选择主文件夹')
+        if not main_folder:
+            return
+        supplement_folder = QFileDialog.getExistingDirectory(self, '选择补充文件夹')
+        if not supplement_folder:
+            return
+        report_path, _ = QFileDialog.getSaveFileName(self, '保存增补报告为', 'supplement_report.txt', 'Text Files (*.txt)')
+        if not report_path:
+            return
+        hash_method, ok = QInputDialog.getItem(self, '选择哈希算法', '哈希算法：', ['md5', 'sha1'], 0, False)
+        if not ok:
+            return
+        self.progress.show()
+        self.log_box.clear()
+        self.log_box.append(f'开始生成增补报告...')
+        self.supp_thread = SupplementReportThread(main_folder, supplement_folder, report_path, hash_method)
+        self.supp_thread.log_signal.connect(self.log_box.append)
+        self.supp_thread.done_signal.connect(self.on_report_done)
+        self.supp_thread.start()
 
     def on_report_done(self, report_path):
         self.progress.hide()

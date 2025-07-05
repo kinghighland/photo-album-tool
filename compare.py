@@ -173,7 +173,7 @@ def supplement_images(main_folder, supplement_folder, report_path, hash_method='
     """
     if dry_run:
         logger.info("[DRY-RUN] 当前为只读模式，不会对任何文件做写入操作。")
-    # 图片增补
+    # 图片增补（原逻辑不变）
     main_meta = collect_images(main_folder)
     supplement_meta = collect_images(supplement_folder)
     logger.info(f"主文件夹图片数: {len(main_meta)}，补充文件夹图片数: {len(supplement_meta)}")
@@ -228,13 +228,22 @@ def supplement_images(main_folder, supplement_folder, report_path, hash_method='
                 logger.info(f"增补图片: {src} -> {dst}")
             except Exception as e:
                 logger.error(f"复制图片失败: {src} -> {dst}, 错误: {e}")
-    # 视频增补
-    video_meta = collect_videos(supplement_folder)
+    # 视频增补（修正：避免重复增补）
+    main_videos = collect_videos(main_folder)
+    supplement_videos = collect_videos(supplement_folder)
+    # 用文件名+大小做唯一性判断（可扩展为哈希）
+    main_video_keys = set((v['name'], v['size']) for v in main_videos)
     mp4_dir = os.path.join(main_folder, f'MP4_{timestamp}')
     if not dry_run:
         os.makedirs(mp4_dir, exist_ok=True)
     video_added = []
-    for meta in video_meta:
+    video_skipped = []
+    for meta in supplement_videos:
+        key = (meta['name'], meta['size'])
+        if key in main_video_keys:
+            video_skipped.append(meta['path'])
+            logger.info(f"已存在视频，未增补: {meta['path']}")
+            continue
         base = meta['name']
         target = os.path.join(mp4_dir, base)
         count = 1
@@ -265,6 +274,9 @@ def supplement_images(main_folder, supplement_folder, report_path, hash_method='
             f.write(f"    {img}\n")
         f.write(f"\n成功增补 {len(video_added)} 个视频到: {mp4_dir}\n")
         for v in video_added:
+            f.write(f"    {v}\n")
+        f.write(f"\n已存在（未增补）{len(video_skipped)} 个视频：\n")
+        for v in video_skipped:
             f.write(f"    {v}\n")
     logger.info(f"增补完成，报告已保存到: {report_path}")
 
