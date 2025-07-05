@@ -15,6 +15,7 @@ import threading
 import traceback
 import importlib.util
 import tempfile
+import time
 
 THUMBNAIL_DIR = '.thumbnails'
 os.makedirs(THUMBNAIL_DIR, exist_ok=True)
@@ -55,40 +56,46 @@ def get_video_thumbnail(video_path, width=240, height=180):
 class ReportThread(QThread):
     log_signal = pyqtSignal(str)
     done_signal = pyqtSignal(str)
-    def __init__(self, folder, report_path, hash_method):
+    def __init__(self, folder, report_path, hash_method, lang):
         super().__init__()
         self.folder = folder
         self.report_path = report_path
         self.hash_method = hash_method
+        self.lang = lang
     def run(self):
         try:
-            self.log_signal.emit(f"开始生成去重报告...")
+            import compare
+            compare.LANG = self.lang
+            self.log_signal.emit(tr('start_dedup'))
             compare.find_duplicates(self.folder, self.report_path, self.hash_method, dry_run=False)
-            self.log_signal.emit(f"报告生成完成: {self.report_path}")
+            self.log_signal.emit(tr('dedup_done', path=self.report_path))
             self.done_signal.emit(self.report_path)
         except Exception as e:
             tb = traceback.format_exc()
-            self.log_signal.emit(f"发生错误: {e}\n{tb}")
+            self.log_signal.emit(tr('error', err=e, tb=tb))
 
 class SupplementReportThread(QThread):
     log_signal = pyqtSignal(str)
     done_signal = pyqtSignal(str)
-    def __init__(self, main_folder, supplement_folder, report_path, hash_method, dry_run=True):
+    def __init__(self, main_folder, supplement_folder, report_path, hash_method, lang, dry_run=True):
         super().__init__()
         self.main_folder = main_folder
         self.supplement_folder = supplement_folder
         self.report_path = report_path
         self.hash_method = hash_method
         self.dry_run = dry_run
+        self.lang = lang
     def run(self):
         try:
-            self.log_signal.emit(f"开始生成增补报告...")
+            import compare
+            compare.LANG = self.lang
+            self.log_signal.emit(tr('start_supp'))
             compare.supplement_images(self.main_folder, self.supplement_folder, self.report_path, self.hash_method, dry_run=self.dry_run)
-            self.log_signal.emit(f"增补报告生成完成: {self.report_path}")
+            self.log_signal.emit(tr('supp_done', path=self.report_path))
             self.done_signal.emit(self.report_path)
         except Exception as e:
             tb = traceback.format_exc()
-            self.log_signal.emit(f"发生错误: {e}\n{tb}")
+            self.log_signal.emit(tr('error', err=e, tb=tb))
 
 class ClickableLabel(QLabel):
     def __init__(self, path, parent=None):
@@ -131,34 +138,56 @@ class DedupGui(QWidget):
         self.current_vid_group = 0
         self.img_checked = {}  # {group_idx: set(保留图片路径)}
         self.vid_checked = {}  # {group_idx: set(保留视频路径)}
+        self.supplement_img_files = []
+        self.supplement_vid_files = []
+        self.supplement_img_target_dir = None
+        self.supplement_vid_target_dir = None
+        self._last_report_start_time = None
+        self._last_report_end_time = None
+        self._last_supp_main_count = None
+        self._last_supp_supp_count = None
+        self._last_supp_corrupt_img = 0
+        self._last_supp_corrupt_vid = 0
         self.init_ui()
 
     def init_ui(self):
         layout = QVBoxLayout(self)
+        # 语言切换区
+        lang_layout = QHBoxLayout()
+        self.lang_label = QLabel(tr('choose_language'))
+        self.combo_lang = QComboBox()
+        self.combo_lang.addItems(['中文', 'English'])
+        self.combo_lang.setCurrentIndex(0 if LANG == 'zh' else 1)
+        self.combo_lang.currentIndexChanged.connect(self.on_language_changed)
+        lang_layout.addWidget(self.lang_label)
+        lang_layout.addWidget(self.combo_lang)
+        lang_layout.addStretch()
+        layout.addLayout(lang_layout)
         # 顶部操作区
         btn_layout = QHBoxLayout()
-        self.btn_generate_report = QPushButton('生成去重报告')
+        self.btn_generate_report = QPushButton(tr('generate_report'))
         self.btn_generate_report.clicked.connect(self.generate_report_dialog)
-        self.btn_generate_supp_report = QPushButton('生成增补报告')
+        self.btn_generate_supp_report = QPushButton(tr('generate_supp_report'))
         self.btn_generate_supp_report.clicked.connect(self.generate_supp_report_dialog)
-        self.btn_load = QPushButton('加载报告')
+        self.btn_load = QPushButton(tr('load_report'))
         self.btn_load.clicked.connect(self.load_report)
-        self.btn_delete = QPushButton('直接删除')
+        self.btn_delete = QPushButton(tr('delete'))
         self.btn_delete.clicked.connect(self.delete_files)
-        self.btn_select_all = QPushButton('所有组全选')
+        self.btn_select_all = QPushButton(tr('select_all'))
         self.btn_select_all.clicked.connect(self.select_all_groups)
-        self.btn_unselect_all = QPushButton('所有组全不选')
+        self.btn_unselect_all = QPushButton(tr('unselect_all'))
         self.btn_unselect_all.clicked.connect(self.unselect_all_groups)
         self.combo_strategy = QComboBox()
-        self.combo_strategy.addItems(['保留第一个', '保留最新', '保留最大'])
+        self.combo_strategy.addItems([tr('keep_first'), tr('keep_newest'), tr('keep_largest')])
         self.combo_strategy.currentIndexChanged.connect(self.apply_strategy)
+        self.batch_select_label = QLabel(tr('batch_select'))
         btn_layout.addWidget(self.btn_generate_report)
         btn_layout.addWidget(self.btn_generate_supp_report)
         btn_layout.addWidget(self.btn_load)
         btn_layout.addWidget(self.btn_delete)
         btn_layout.addWidget(self.btn_select_all)
         btn_layout.addWidget(self.btn_unselect_all)
-        btn_layout.addWidget(QLabel('批量选择:'))
+        btn_layout.addWidget(self.batch_select_label)
         btn_layout.addWidget(self.combo_strategy)
         layout.addLayout(btn_layout)
         # 日志输出区
@@ -172,14 +201,6 @@ class DedupGui(QWidget):
         self.progress.setMaximum(0)  # 不确定进度时为忙等待
         self.progress.hide()
         layout.addWidget(self.progress)
-        # 移除分组搜索区
-        # search_layout = QHBoxLayout()
-        # self.search_box = QLineEdit()
-        # self.search_box.setPlaceholderText('搜索分组...')
-        # self.search_box.textChanged.connect(self.filter_groups)
-        # search_layout.addWidget(QLabel('分组搜索:'))
-        # search_layout.addWidget(self.search_box)
-        # layout.addLayout(search_layout)
         # TabWidget
         self.tabs = QTabWidget()
         # 图片Tab
@@ -191,22 +212,22 @@ class DedupGui(QWidget):
         right = QVBoxLayout()
         # 本组全选/全不选
         group_btn_layout = QHBoxLayout()
-        self.btn_group_select_all = QPushButton('本组全选')
+        self.btn_group_select_all = QPushButton(tr('select_all'))
         self.btn_group_select_all.clicked.connect(self.select_all_current_group)
-        self.btn_group_unselect_all = QPushButton('本组全不选')
+        self.btn_group_unselect_all = QPushButton(tr('unselect_all'))
         self.btn_group_unselect_all.clicked.connect(self.unselect_all_current_group)
         group_btn_layout.addWidget(self.btn_group_select_all)
         group_btn_layout.addWidget(self.btn_group_unselect_all)
         right.addLayout(group_btn_layout)
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
-        self.img_group = QGroupBox('重复图片')
+        self.img_group = QGroupBox(tr('img_tab'))
         self.img_layout = QVBoxLayout()
         self.img_group.setLayout(self.img_layout)
         self.scroll.setWidget(self.img_group)
         right.addWidget(self.scroll, 8)
         img_layout.addLayout(right, 8)
-        self.tabs.addTab(img_tab, '图片重复组')
+        self.tabs.addTab(img_tab, tr('img_tab'))
         # 视频Tab
         vid_tab = QWidget()
         vid_layout = QHBoxLayout(vid_tab)
@@ -216,41 +237,41 @@ class DedupGui(QWidget):
         vid_right = QVBoxLayout()
         # 本组全选/全不选
         vid_group_btn_layout = QHBoxLayout()
-        self.btn_vid_group_select_all = QPushButton('本组全选')
+        self.btn_vid_group_select_all = QPushButton(tr('select_all'))
         self.btn_vid_group_select_all.clicked.connect(self.select_all_current_vid_group)
-        self.btn_vid_group_unselect_all = QPushButton('本组全不选')
+        self.btn_vid_group_unselect_all = QPushButton(tr('unselect_all'))
         self.btn_vid_group_unselect_all.clicked.connect(self.unselect_all_current_vid_group)
         vid_group_btn_layout.addWidget(self.btn_vid_group_select_all)
         vid_group_btn_layout.addWidget(self.btn_vid_group_unselect_all)
         vid_right.addLayout(vid_group_btn_layout)
         self.vid_scroll = QScrollArea()
         self.vid_scroll.setWidgetResizable(True)
-        self.vid_group_box = QGroupBox('重复视频')
+        self.vid_group_box = QGroupBox(tr('vid_tab'))
         self.vid_layout = QVBoxLayout()
         self.vid_group_box.setLayout(self.vid_layout)
         self.vid_scroll.setWidget(self.vid_group_box)
         vid_right.addWidget(self.vid_scroll, 8)
         vid_layout.addLayout(vid_right, 8)
-        self.tabs.addTab(vid_tab, '视频重复组')
+        self.tabs.addTab(vid_tab, tr('vid_tab'))
         # 增补结果Tab
         self.supplement_tab = QWidget()
         supp_layout = QVBoxLayout(self.supplement_tab)
-        supp_layout.addWidget(QLabel('成功增补的图片：'))
+        supp_layout.addWidget(QLabel(tr('supp_img')))
         self.supplement_img_list = QListWidget()
         supp_layout.addWidget(self.supplement_img_list, 4)
-        self.btn_move_img_supp = QPushButton('批量移动增补图片到指定目录')
+        self.btn_move_img_supp = QPushButton(tr('move_supp_img'))
         self.btn_move_img_supp.clicked.connect(lambda: self.move_supplement_files('img'))
         supp_layout.addWidget(self.btn_move_img_supp)
-        supp_layout.addWidget(QLabel('成功增补的视频：'))
+        supp_layout.addWidget(QLabel(tr('supp_vid')))
         self.supplement_vid_list = QListWidget()
         supp_layout.addWidget(self.supplement_vid_list, 2)
-        self.btn_move_vid_supp = QPushButton('批量移动增补视频到指定目录')
+        self.btn_move_vid_supp = QPushButton(tr('move_supp_vid'))
         self.btn_move_vid_supp.clicked.connect(lambda: self.move_supplement_files('vid'))
         supp_layout.addWidget(self.btn_move_vid_supp)
-        self.tabs.addTab(self.supplement_tab, '增补结果')
+        self.tabs.addTab(self.supplement_tab, tr('supp_tab'))
         layout.addWidget(self.tabs)
-        self.supplement_img_files = []
-        self.supplement_vid_files = []
+        import compare
+        compare.LANG = LANG
 
     def apply_strategy(self):
         strategy = self.combo_strategy.currentText()
@@ -258,25 +279,25 @@ class DedupGui(QWidget):
             if not group:
                 self.img_checked[i] = set()
                 continue
-            if strategy == '保留第一个':
+            if strategy == tr('keep_first'):
                 self.img_checked[i] = {group[0]}
-            elif strategy == '保留最新':
+            elif strategy == tr('keep_newest'):
                 newest = max(group, key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0)
                 self.img_checked[i] = {newest}
-            elif strategy == '保留最大':
+            elif strategy == tr('keep_largest'):
                 largest = max(group, key=lambda p: os.path.getsize(p) if os.path.exists(p) else 0)
                 self.img_checked[i] = {largest}
         self.show_group(self.current_img_group)
 
     def load_report(self):
-        path, _ = QFileDialog.getOpenFileName(self, '选择去重报告', '', 'Text Files (*.txt)')
+        path, _ = QFileDialog.getOpenFileName(self, tr('select_report'), '', tr('text_files'))
         if not path:
             return
         self.report_path = path
         # 检查是否为增补报告
         with open(path, 'r', encoding='utf-8') as f:
             first_lines = [f.readline() for _ in range(5)]
-        if any('增补图片报告' in line for line in first_lines):
+        if any(tr('supplement_report') in line for line in first_lines):
             self.show_supplement_report(path)
             self.tabs.setCurrentWidget(self.supplement_tab)
             return
@@ -286,12 +307,12 @@ class DedupGui(QWidget):
         self.vid_checked = {i: {group[0]} if group else set() for i, group in enumerate(self.vid_groups)}
         self.group_list.clear()
         for i, group in enumerate(self.img_groups):
-            self.group_list.addItem(f'重复组{i+1} ({len(group)}张)')
+            self.group_list.addItem(f"{tr('group')}{i+1} ({len(group)})")
         if self.img_groups:
             self.group_list.setCurrentRow(0)
         self.vid_group_list.clear()
         for i, group in enumerate(self.vid_groups):
-            self.vid_group_list.addItem(f'视频组{i+1} ({len(group)}个)')
+            self.vid_group_list.addItem(f"{tr('video_group')}{i+1} ({len(group)})")
         if self.vid_groups:
             self.vid_group_list.setCurrentRow(0)
         self.combo_strategy.setCurrentIndex(0)
@@ -306,14 +327,14 @@ class DedupGui(QWidget):
         mode = None  # 'img' or 'vid'
         for line in lines:
             l = line.strip()
-            if l.startswith('重复图片组') or l.startswith('重复组'):
+            if l.startswith(tr('img_tab')) or l.startswith(tr('group')):
                 if group and mode == 'img':
                     img_groups.append(group)
                 if group and mode == 'vid':
                     vid_groups.append(group)
                 group = []
                 mode = 'img'
-            elif l.startswith('视频重复组') or l.startswith('重复视频文件'):
+            elif l.startswith(tr('vid_tab')) or l.startswith(tr('video_group')):
                 if group and mode == 'img':
                     img_groups.append(group)
                 if group and mode == 'vid':
@@ -364,7 +385,7 @@ class DedupGui(QWidget):
             path_label = QLabel(path)
             path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
             row.addWidget(path_label, 2)
-            cb = QCheckBox('保留')
+            cb = QCheckBox(tr('keep'))
             cb.setChecked(path in self.img_checked[idx])
             cb.stateChanged.connect(lambda state, p=path: self.on_check_changed(idx, p, state))
             row.addWidget(cb)
@@ -433,7 +454,7 @@ class DedupGui(QWidget):
             path_label = QLabel(path)
             path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
             row.addWidget(path_label, 2)
-            cb = QCheckBox('保留')
+            cb = QCheckBox(tr('keep'))
             cb.setChecked(path in self.vid_checked[idx])
             cb.stateChanged.connect(lambda state, p=path: self.on_vid_check_changed(idx, p, state))
             row.addWidget(cb)
@@ -517,9 +538,9 @@ class DedupGui(QWidget):
                 if path not in self.vid_checked[idx]:
                     delete_list.append(path)
         if not delete_list:
-            QMessageBox.information(self, '直接删除', '没有需要删除的文件。')
+            QMessageBox.information(self, tr('delete'), tr('no_files_to_delete'))
             return
-        reply = QMessageBox.question(self, '确认删除', f'确定要删除 {len(delete_list)} 个文件吗？此操作不可恢复！',
+        reply = QMessageBox.question(self, tr('confirm_delete'), f'{tr("confirm_delete_msg")} {len(delete_list)} {tr("files")}?',
                                      QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if reply != QMessageBox.Yes:
             return
@@ -531,9 +552,9 @@ class DedupGui(QWidget):
             except Exception as e:
                 failed.append((path, str(e)))
         if not failed:
-            QMessageBox.information(self, '删除完成', f'成功删除 {len(delete_list)} 个文件。')
+            QMessageBox.information(self, tr('delete_complete'), f'{tr("delete_complete_msg")} {len(delete_list)} {tr("files")}.')
         else:
-            QMessageBox.warning(self, '部分删除失败', f'有 {len(failed)} 个文件删除失败。\n' + '\n'.join(f[0] for f in failed))
+            QMessageBox.warning(self, tr('partial_delete_failed'), f'{tr("partial_delete_failed_msg")} {len(failed)} {tr("files")} {tr("delete_failed")}.\n' + '\n'.join(f[0] for f in failed))
         self.load_report()
 
     def show_supplement_report(self, path):
@@ -543,27 +564,34 @@ class DedupGui(QWidget):
         self.supplement_vid_files = []
         self.supplement_img_target_dir = None
         self.supplement_vid_target_dir = None
+        self._last_supp_corrupt_img = 0
+        self._last_supp_corrupt_vid = 0
         with open(path, 'r', encoding='utf-8') as f:
             lines = f.readlines()
         mode = None
         for line in lines:
             l = line.rstrip('\r\n')
-            if l.startswith('成功增补') and '图片' in l:
+            if l.startswith(tr('supp_img_success')) and tr('img') in l:
                 mode = 'img'
                 m = re.search(r'到: (.+)$', l)
                 if m:
                     self.supplement_img_target_dir = m.group(1).strip()
                 continue
-            if l.startswith('成功增补') and '视频' in l:
+            if l.startswith(tr('supp_vid_success')) and tr('vid') in l:
                 mode = 'vid'
                 m = re.search(r'到: (.+)$', l)
                 if m:
                     self.supplement_vid_target_dir = m.group(1).strip()
                 continue
-            if l.startswith('已存在') or l.strip() == '' or l.startswith('[DRY-RUN]') or l.startswith('增补图片报告'):
+            if l.startswith(tr('already_exists')) or l.strip() == '' or l.startswith(tr('dry_run')) or l.startswith(tr('supp_img_report')):
                 mode = None
                 continue
-            # 兼容 D:/ 和 D:\ 路径
+            if tr('corrupted_files') in l and mode == 'img':
+                self._last_supp_corrupt_img += 1
+                continue
+            if tr('corrupted_files') in l and mode == 'vid':
+                self._last_supp_corrupt_vid += 1
+                continue
             if re.search(r'[A-Za-z]:[\\/]', l):
                 if mode == 'img':
                     self.supplement_img_files.append(l.strip())
@@ -599,7 +627,7 @@ class DedupGui(QWidget):
                 thumb_label.mousePressEvent = lambda e, f=show_big_thumb: f()
                 hbox.addWidget(thumb_label)
             else:
-                hbox.addWidget(QLabel('无缩略图'))
+                hbox.addWidget(QLabel(tr('no_thumbnail')))
             hbox.addWidget(QLabel(f))
             item_widget.setLayout(hbox)
             list_item = QListWidgetItem()
@@ -636,7 +664,7 @@ class DedupGui(QWidget):
                 thumb_label.mousePressEvent = lambda e, f=show_big_thumb: f()
                 hbox.addWidget(thumb_label)
             else:
-                hbox.addWidget(QLabel('无缩略图'))
+                hbox.addWidget(QLabel(tr('no_thumbnail')))
             hbox.addWidget(QLabel(f))
             item_widget.setLayout(hbox)
             list_item = QListWidgetItem()
@@ -648,26 +676,26 @@ class DedupGui(QWidget):
     def move_supplement_files(self, which):
         if which == 'img':
             files = self.supplement_img_files
-            label = '图片'
+            label = tr('img')
             target_dir = self.supplement_img_target_dir
         else:
             files = self.supplement_vid_files
-            label = '视频'
+            label = tr('vid')
             target_dir = self.supplement_vid_target_dir
         if not files:
-            QMessageBox.information(self, '批量移动', f'没有可移动的增补{label}。')
+            QMessageBox.information(self, tr('batch_move'), f'{tr("no_files_to_move")} {label}.')
             return
         if not target_dir:
-            QMessageBox.warning(self, '批量移动', f'未能从报告中识别出增补{label}的目标目录。')
+            QMessageBox.warning(self, tr('batch_move'), f'{tr("target_dir_not_found")} {label}.')
             return
         if not os.path.exists(target_dir):
             try:
                 os.makedirs(target_dir, exist_ok=True)
             except Exception as e:
-                QMessageBox.warning(self, '批量移动', f'目标目录不存在且创建失败：\n{target_dir}\n错误信息：{e}')
+                QMessageBox.warning(self, tr('batch_move'), f'{tr("target_dir_create_fail")}\n{target_dir}\n{e}')
                 return
         # 新增：损坏文件集中到一个子文件夹
-        corrupt_dir = os.path.join(target_dir, '损坏文件')
+        corrupt_dir = os.path.join(target_dir, tr('corrupted_files'))
         if not os.path.exists(corrupt_dir):
             os.makedirs(corrupt_dir, exist_ok=True)
         failed = []
@@ -708,88 +736,374 @@ class DedupGui(QWidget):
                     os.rename(f, target)
             except Exception as e:
                 failed.append((f, str(e)))
-        msg = f'成功移动 {len(files)-len(failed)} 个{label}到\n{target_dir}'
+        msg = f'{tr("move_success")} {len(files)-len(failed)} {label} {tr("to")}\n{target_dir}'
         if corrupt:
-            msg += f'\n其中 {len(corrupt)} 个疑似损坏文件已移动到: {corrupt_dir}'
+            msg += f'\n{tr("move_corrupt")} {len(corrupt)} {tr("corrupted_files")} {tr("to")}: {corrupt_dir}'
         if not failed:
-            QMessageBox.information(self, '批量移动', msg)
+            QMessageBox.information(self, tr('batch_move'), msg)
         else:
-            QMessageBox.warning(self, '部分移动失败', f'有 {len(failed)} 个{label}移动失败。\n' + '\n'.join(f[0] for f in failed))
+            QMessageBox.warning(self, tr('partial_move_failed'), f'{tr("partial_move_failed_msg")} {len(failed)} {label} {tr("move_failed")}.\n' + '\n'.join(f[0] for f in failed))
 
     def generate_report_dialog(self):
-        folder = QFileDialog.getExistingDirectory(self, '选择待去重文件夹')
+        folder = QFileDialog.getExistingDirectory(self, tr('select_target_folder'))
         if not folder:
             return
         self.log_box.clear()
-        self.log_box.append(f'已选择待去重文件夹: {folder}')
-        report_path, _ = QFileDialog.getSaveFileName(self, '保存报告为', 'report.txt', 'Text Files (*.txt)')
+        self.log_box.append(f'{tr("selected_target_folder")}: {folder}')
+        report_path, _ = QFileDialog.getSaveFileName(self, tr('save_report_as'), 'report.txt', tr('text_files'))
         if not report_path:
             return
         hash_method = 'md5'
-        # hash_method, ok = QInputDialog.getItem(self, '选择哈希算法', '哈希算法：', ['md5', 'sha1'], 0, False)
-        # if not ok:
-        #    return
         self.progress.show()
-        self.thread = ReportThread(folder, report_path, hash_method)
+        self._last_report_start_time = time.time()
+        self.thread = ReportThread(folder, report_path, hash_method, LANG)
         self.thread.log_signal.connect(self.log_box.append)
         self.thread.done_signal.connect(self.on_report_done)
         self.thread.start()
 
     def generate_supp_report_dialog(self):
-        main_folder = QFileDialog.getExistingDirectory(self, '选择主文件夹')
+        main_folder = QFileDialog.getExistingDirectory(self, tr('select_main_folder'))
         if not main_folder:
             return
         self.log_box.clear()
-        self.log_box.append(f'已选择主文件夹: {main_folder}')
-        supplement_folder = QFileDialog.getExistingDirectory(self, '选择补充文件夹')
+        self.log_box.append(f'{tr("selected_main_folder")}: {main_folder}')
+        supplement_folder = QFileDialog.getExistingDirectory(self, tr('select_supp_folder'))
         if not supplement_folder:
             return
-        self.log_box.append(f'已选择补充文件夹: {supplement_folder}')
+        self.log_box.append(f'{tr("selected_supp_folder")}: {supplement_folder}')
         if os.path.abspath(main_folder) == os.path.abspath(supplement_folder):
-            QMessageBox.warning(self, '参数错误', '主文件夹和补充文件夹不能相同，请重新选择！')
+            QMessageBox.warning(self, tr('param_error'), tr('main_supp_same'))
             return
-        report_path, _ = QFileDialog.getSaveFileName(self, '保存增补报告为', 'supplement_report.txt', 'Text Files (*.txt)')
+        report_path, _ = QFileDialog.getSaveFileName(self, tr('save_supp_report_as'), 'supplement_report.txt', tr('text_files'))
         if not report_path:
             return
         hash_method = 'md5'
-        # hash_method, ok = QInputDialog.getItem(self, '选择哈希算法', '哈希算法：', ['md5', 'sha1'], 0, False)
-        # if not ok:
-        #    return
         self.progress.show()
-        self.supp_thread = SupplementReportThread(main_folder, supplement_folder, report_path, hash_method, dry_run=True)
+        self._last_report_start_time = time.time()
+        self.supp_thread = SupplementReportThread(main_folder, supplement_folder, report_path, hash_method, LANG, dry_run=True)
         self.supp_thread.log_signal.connect(self.log_box.append)
         self.supp_thread.done_signal.connect(self.on_report_done)
         self.supp_thread.start()
 
     def on_report_done(self, report_path):
         self.progress.hide()
-        self.log_box.append(f'报告生成完成，自动加载报告...')
+        self._last_report_end_time = time.time()
+        self.log_box.append(f'{tr("report_done")}')
         self.load_report_path(report_path)
 
     def load_report_path(self, path):
         self.report_path = path
         # 检查是否为增补报告
         with open(path, 'r', encoding='utf-8') as f:
-            first_lines = [f.readline() for _ in range(5)]
-        if any('增补图片报告' in line for line in first_lines):
+            first_lines = [f.readline() for _ in range(10)]
+        if any(tr('supp_img_report') in line for line in first_lines):
+            # 解析主/补库扫描数
+            main_count, supp_count = None, None
+            for line in first_lines:
+                if tr('main_scanned') in line:
+                    m = re.search(r'主库共扫描(\d+)个文件', line)
+                    if m:
+                        main_count = int(m.group(1))
+                if tr('supp_scanned') in line:
+                    m = re.search(r'补充库共扫描(\d+)个文件', line)
+                    if m:
+                        supp_count = int(m.group(1))
+            self._last_supp_main_count = main_count
+            self._last_supp_supp_count = supp_count
             self.show_supplement_report(path)
             self.tabs.setCurrentWidget(self.supplement_tab)
+            self.log_supplement_stats()
             return
         self.img_groups, self.vid_groups = self.parse_report(path)
         self.img_checked = {i: {group[0]} if group else set() for i, group in enumerate(self.img_groups)}
         self.vid_checked = {i: {group[0]} if group else set() for i, group in enumerate(self.vid_groups)}
         self.group_list.clear()
         for i, group in enumerate(self.img_groups):
-            self.group_list.addItem(f'重复组{i+1} ({len(group)}张)')
+            self.group_list.addItem(f"{tr('group')}{i+1} ({len(group)})")
         if self.img_groups:
             self.group_list.setCurrentRow(0)
         self.vid_group_list.clear()
         for i, group in enumerate(self.vid_groups):
-            self.vid_group_list.addItem(f'视频组{i+1} ({len(group)}个)')
+            self.vid_group_list.addItem(f"{tr('video_group')}{i+1} ({len(group)})")
         if self.vid_groups:
             self.vid_group_list.setCurrentRow(0)
         self.combo_strategy.setCurrentIndex(0)
         self.tabs.setCurrentIndex(0)
+        self.log_dedup_stats()
+
+    def log_dedup_stats(self):
+        # 统计去重报告
+        img_total = sum(len(g) for g in self.img_groups)
+        vid_total = sum(len(g) for g in self.vid_groups)
+        img_del = sum(len(g)-1 for g in self.img_groups if len(g)>1)
+        vid_del = sum(len(g)-1 for g in self.vid_groups if len(g)>1)
+        img_del_size = 0
+        img_corrupt = 0
+        for g in self.img_groups:
+            for p in g[1:]:
+                try:
+                    img_del_size += os.path.getsize(p)
+                except Exception:
+                    pass
+            for p in g:
+                if not os.path.exists(p):
+                    img_corrupt += 1
+                else:
+                    try:
+                        from PIL import Image
+                        with Image.open(p) as im:
+                            im.verify()
+                    except Exception:
+                        img_corrupt += 1
+        vid_del_size = 0
+        vid_corrupt = 0
+        for g in self.vid_groups:
+            for p in g[1:]:
+                try:
+                    vid_del_size += os.path.getsize(p)
+                except Exception:
+                    pass
+            for p in g:
+                if not os.path.exists(p):
+                    vid_corrupt += 1
+        elapsed = None
+        if self._last_report_start_time and self._last_report_end_time:
+            elapsed = self._last_report_end_time - self._last_report_start_time
+        msg = f"{tr('stat_dedup')}"
+        msg += f"\n  {tr('img_total', count=img_total)}, {tr('img_del', count=img_del)}, {tr('img_save', size=img_del_size/1024/1024)}, {tr('img_corrupt', count=img_corrupt)}"
+        msg += f"\n  {tr('vid_total', count=vid_total)}, {tr('vid_del', count=vid_del)}, {tr('vid_save', size=vid_del_size/1024/1024)}, {tr('vid_corrupt', count=vid_corrupt)}"
+        if elapsed:
+            msg += f"\n  {tr('elapsed', sec=elapsed)}"
+        self.log_box.append(msg)
+
+    def log_supplement_stats(self):
+        img_count = len(self.supplement_img_files)
+        vid_count = len(self.supplement_vid_files)
+        img_size = 0
+        for p in self.supplement_img_files:
+            try:
+                img_size += os.path.getsize(p)
+            except Exception:
+                pass
+        vid_size = 0
+        for p in self.supplement_vid_files:
+            try:
+                vid_size += os.path.getsize(p)
+            except Exception:
+                pass
+        elapsed = None
+        if self._last_report_start_time and self._last_report_end_time:
+            elapsed = self._last_report_end_time - self._last_report_start_time
+        msg = f"{tr('stat_supp')}"
+        if self._last_supp_main_count is not None:
+            msg += f"\n  {tr('main_scanned', count=self._last_supp_main_count)}"
+        if self._last_supp_supp_count is not None:
+            msg += f"\n  {tr('supp_scanned', count=self._last_supp_supp_count)}"
+        msg += f"\n  {tr('supp_img', count=img_count)}, {tr('supp_img_save', size=img_size/1024/1024)}, {tr('supp_img_corrupt', count=self._last_supp_corrupt_img)}"
+        msg += f"\n  {tr('supp_vid', count=vid_count)}, {tr('supp_vid_save', size=vid_size/1024/1024)}, {tr('supp_vid_corrupt', count=self._last_supp_corrupt_vid)}"
+        if elapsed:
+            msg += f"\n  {tr('elapsed', sec=elapsed)}"
+        self.log_box.append(msg)
+
+    def on_language_changed(self, idx):
+        global LANG
+        LANG = 'zh' if idx == 0 else 'en'
+        import compare
+        compare.LANG = LANG
+        self.retranslate_ui()
+
+    def retranslate_ui(self):
+        self.setWindowTitle(tr('title'))
+        self.btn_generate_report.setText(tr('generate_report'))
+        self.btn_generate_supp_report.setText(tr('generate_supp_report'))
+        self.btn_load.setText(tr('load_report'))
+        self.btn_delete.setText(tr('delete'))
+        self.btn_select_all.setText(tr('select_all'))
+        self.btn_unselect_all.setText(tr('unselect_all'))
+        self.batch_select_label.setText(tr('batch_select'))
+        self.combo_strategy.setItemText(0, tr('keep_first'))
+        self.combo_strategy.setItemText(1, tr('keep_newest'))
+        self.combo_strategy.setItemText(2, tr('keep_largest'))
+        self.tabs.setTabText(0, tr('img_tab'))
+        self.tabs.setTabText(1, tr('vid_tab'))
+        self.tabs.setTabText(2, tr('supp_tab'))
+        self.btn_group_select_all.setText(tr('select_all'))
+        self.btn_group_unselect_all.setText(tr('unselect_all'))
+        self.btn_vid_group_select_all.setText(tr('select_all'))
+        self.btn_vid_group_unselect_all.setText(tr('unselect_all'))
+        self.img_group.setTitle(tr('img_tab'))
+        self.vid_group_box.setTitle(tr('vid_tab'))
+        self.btn_move_img_supp.setText(tr('move_supp_img'))
+        self.btn_move_vid_supp.setText(tr('move_supp_vid'))
+        # 重新设置增补tab标签
+        self.supplement_tab.layout().itemAt(0).widget().setText(tr('supp_img'))
+        self.supplement_tab.layout().itemAt(3).widget().setText(tr('supp_vid'))
+        # 语言切换标签
+        self.combo_lang.setItemText(0, '中文')
+        self.combo_lang.setItemText(1, 'English')
+        self.lang_label.setText(tr('choose_language'))
+        # 刷新分组列表
+        self.group_list.clear()
+        for i, group in enumerate(self.img_groups):
+            self.group_list.addItem(f"{tr('group')}{i+1} ({len(group)})")
+        self.vid_group_list.clear()
+        for i, group in enumerate(self.vid_groups):
+            self.vid_group_list.addItem(f"{tr('video_group')}{i+1} ({len(group)})")
+
+LANG = 'zh'
+TRANSLATIONS = {
+    'zh': {
+        'title': '照片去重报告处理工具',
+        'generate_report': '生成去重报告',
+        'generate_supp_report': '生成增补报告',
+        'load_report': '加载报告',
+        'delete': '直接删除',
+        'select_all': '所有组全选',
+        'unselect_all': '所有组全不选',
+        'batch_select': '批量选择:',
+        'keep_first': '保留第一个',
+        'keep_newest': '保留最新',
+        'keep_largest': '保留最大',
+        'img_tab': '图片重复组',
+        'vid_tab': '视频重复组',
+        'supp_tab': '增补结果',
+        'supp_img': '成功增补的图片：',
+        'supp_vid': '成功增补的视频：',
+        'move_supp_img': '批量移动增补图片到指定目录',
+        'move_supp_vid': '批量移动增补视频到指定目录',
+        'select_main_folder': '选择主文件夹',
+        'select_supp_folder': '选择补充文件夹',
+        'select_target_folder': '选择待去重文件夹',
+        'save_report_as': '保存报告为',
+        'save_supp_report_as': '保存增补报告为',
+        'text_files': 'Text Files (*.txt)',
+        'param_error': '参数错误',
+        'main_supp_same': '主文件夹和补充文件夹不能相同，请重新选择！',
+        'no_files_to_move': '没有可移动的增补{label}。',
+        'target_dir_not_found': '未能从报告中识别出增补{label}的目标目录。',
+        'target_dir_create_fail': '目标目录不存在且创建失败：\n{target_dir}\n错误信息：{err}',
+        'move_success': '成功移动 {count} 个{label}到\n{target_dir}',
+        'move_corrupt': '\n其中 {corrupt} 个疑似损坏文件已移动到: {corrupt_dir}',
+        'move_failed': '有 {count} 个{label}移动失败。\n{files}',
+        'batch_move': '批量移动',
+        'partial_move_failed': '部分移动失败',
+        'select_report': '选择去重报告',
+        'select_report_tip': 'Text Files (*.txt)',
+        'file_not_exist': '文件不存在',
+        'cannot_load_image': '无法加载图片',
+        'no_thumbnail': '无缩略图',
+        'keep': '保留',
+        'group': '重复组',
+        'video_group': '视频组',
+        'supplement_report': '增补图片报告',
+        'already_exists': '已存在',
+        'dry_run': '[DRY-RUN] 只读模式，未做任何实际写入操作',
+        'corrupted_files': '损坏文件',
+        'stat_dedup': '[统计] 去重分析：',
+        'stat_supp': '[统计] 增补分析：',
+        'main_scanned': '主库共扫描: {count} 个文件',
+        'supp_scanned': '补充库共扫描: {count} 个文件',
+        'img_total': '总扫描图片: {count} 张',
+        'img_del': '预计可删除: {count} 张',
+        'img_save': '预计节省空间: {size:.2f} MB',
+        'img_corrupt': '疑似损坏图片: {count} 张',
+        'vid_total': '总扫描视频: {count} 个',
+        'vid_del': '预计可删除: {count} 个',
+        'vid_save': '预计节省空间: {size:.2f} MB',
+        'vid_corrupt': '疑似损坏视频: {count} 个',
+        'supp_img': '需增补图片: {count} 张',
+        'supp_img_save': '预计增补空间: {size:.2f} MB',
+        'supp_img_corrupt': '疑似损坏图片: {count}',
+        'supp_vid': '需增补视频: {count} 个',
+        'supp_vid_save': '预计增补空间: {size:.2f} MB',
+        'supp_vid_corrupt': '疑似损坏视频: {count}',
+        'elapsed': '分析/报告生成耗时: {sec:.1f} 秒',
+        'report_done': '报告生成完成，自动加载报告...',
+        'start_dedup': '开始生成去重报告...',
+        'dedup_done': '报告生成完成: {path}',
+        'start_supp': '开始生成增补报告...',
+        'supp_done': '增补报告生成完成: {path}',
+        'error': '发生错误: {err}\n{tb}',
+        'choose_language': '语言/Language:',
+    },
+    'en': {
+        'title': 'Photo Deduplication & Supplement Tool',
+        'generate_report': 'Generate Deduplication Report',
+        'generate_supp_report': 'Generate Supplement Report',
+        'load_report': 'Load Report',
+        'delete': 'Delete Directly',
+        'select_all': 'Select All Groups',
+        'unselect_all': 'Unselect All Groups',
+        'batch_select': 'Batch Select:',
+        'keep_first': 'Keep First',
+        'keep_newest': 'Keep Newest',
+        'keep_largest': 'Keep Largest',
+        'img_tab': 'Image Groups',
+        'vid_tab': 'Video Groups',
+        'supp_tab': 'Supplement Result',
+        'supp_img': 'Supplemented Images:',
+        'supp_vid': 'Supplemented Videos:',
+        'move_supp_img': 'Batch Move Supplemented Images',
+        'move_supp_vid': 'Batch Move Supplemented Videos',
+        'select_main_folder': 'Select Main Folder',
+        'select_supp_folder': 'Select Supplement Folder',
+        'select_target_folder': 'Select Target Folder',
+        'save_report_as': 'Save Report As',
+        'save_supp_report_as': 'Save Supplement Report As',
+        'text_files': 'Text Files (*.txt)',
+        'param_error': 'Parameter Error',
+        'main_supp_same': 'Main and supplement folders cannot be the same. Please reselect!',
+        'no_files_to_move': 'No supplement {label} to move.',
+        'target_dir_not_found': 'Failed to detect target directory for supplement {label} from report.',
+        'target_dir_create_fail': 'Target directory does not exist and creation failed:\n{target_dir}\nError: {err}',
+        'move_success': 'Successfully moved {count} {label} to\n{target_dir}',
+        'move_corrupt': '\n{corrupt} suspected corrupted files moved to: {corrupt_dir}',
+        'move_failed': '{count} {label} failed to move.\n{files}',
+        'batch_move': 'Batch Move',
+        'partial_move_failed': 'Partial Move Failed',
+        'select_report': 'Select Deduplication Report',
+        'select_report_tip': 'Text Files (*.txt)',
+        'file_not_exist': 'File Not Exist',
+        'cannot_load_image': 'Cannot Load Image',
+        'no_thumbnail': 'No Thumbnail',
+        'keep': 'Keep',
+        'group': 'Group',
+        'video_group': 'Video Group',
+        'supplement_report': 'Supplement Report',
+        'already_exists': 'Already Exists',
+        'dry_run': '[DRY-RUN] Readonly mode, no actual file operation',
+        'corrupted_files': 'Corrupted Files',
+        'stat_dedup': '[Stats] Deduplication:',
+        'stat_supp': '[Stats] Supplement:',
+        'main_scanned': 'Main scanned: {count} files',
+        'supp_scanned': 'Supplement scanned: {count} files',
+        'img_total': 'Total images: {count}',
+        'img_del': 'Deletable: {count}',
+        'img_save': 'Space to save: {size:.2f} MB',
+        'img_corrupt': 'Suspected corrupted images: {count}',
+        'vid_total': 'Total videos: {count}',
+        'vid_del': 'Deletable: {count}',
+        'vid_save': 'Space to save: {size:.2f} MB',
+        'vid_corrupt': 'Suspected corrupted videos: {count}',
+        'supp_img': 'Images to supplement: {count}',
+        'supp_img_save': 'Space to supplement: {size:.2f} MB',
+        'supp_img_corrupt': 'Suspected corrupted images: {count}',
+        'supp_vid': 'Videos to supplement: {count}',
+        'supp_vid_save': 'Space to supplement: {size:.2f} MB',
+        'supp_vid_corrupt': 'Suspected corrupted videos: {count}',
+        'elapsed': 'Elapsed: {sec:.1f} s',
+        'report_done': 'Report generated, loading automatically...',
+        'start_dedup': 'Generating deduplication report...',
+        'dedup_done': 'Report generated: {path}',
+        'start_supp': 'Generating supplement report...',
+        'supp_done': 'Supplement report generated: {path}',
+        'error': 'Error: {err}\n{tb}',
+        'choose_language': 'Language:',
+    }
+}
+def tr(key, **kwargs):
+    s = TRANSLATIONS.get(LANG, TRANSLATIONS['zh']).get(key, key)
+    return s.format(**kwargs) if kwargs else s
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
