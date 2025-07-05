@@ -14,6 +14,7 @@ import re
 import threading
 import traceback
 import importlib.util
+import tempfile
 
 THUMBNAIL_DIR = '.thumbnails'
 os.makedirs(THUMBNAIL_DIR, exist_ok=True)
@@ -23,6 +24,33 @@ spec = importlib.util.spec_from_file_location("compare", "compare.py")
 compare = importlib.util.module_from_spec(spec)
 sys.modules["compare"] = compare
 spec.loader.exec_module(compare)
+
+def get_video_thumbnail(video_path, width=240, height=180):
+    """
+    用 ffmpeg 生成视频缩略图，返回 QPixmap。
+    """
+    import subprocess
+    import os
+    from PyQt5.QtGui import QPixmap
+    import tempfile
+    if not os.path.exists(video_path):
+        return QPixmap()
+    with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
+        thumb_path = tmp.name
+    try:
+        # 取第1秒帧，缩略图尺寸 width x height
+        cmd = [
+            'ffmpeg', '-y', '-i', video_path, '-ss', '00:00:01.000', '-vframes', '1',
+            '-vf', f'scale={width}:{height}:force_original_aspect_ratio=decrease', thumb_path
+        ]
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        pix = QPixmap(thumb_path)
+    except Exception:
+        pix = QPixmap()
+    finally:
+        if os.path.exists(thumb_path):
+            os.remove(thumb_path)
+    return pix
 
 class ReportThread(QThread):
     log_signal = pyqtSignal(str)
@@ -34,9 +62,9 @@ class ReportThread(QThread):
         self.hash_method = hash_method
     def run(self):
         try:
-            self.log_signal.emit(f"开始生成去重报告...\n")
+            self.log_signal.emit(f"开始生成去重报告...")
             compare.find_duplicates(self.folder, self.report_path, self.hash_method, dry_run=False)
-            self.log_signal.emit(f"报告生成完成: {self.report_path}\n")
+            self.log_signal.emit(f"报告生成完成: {self.report_path}")
             self.done_signal.emit(self.report_path)
         except Exception as e:
             tb = traceback.format_exc()
@@ -45,17 +73,18 @@ class ReportThread(QThread):
 class SupplementReportThread(QThread):
     log_signal = pyqtSignal(str)
     done_signal = pyqtSignal(str)
-    def __init__(self, main_folder, supplement_folder, report_path, hash_method):
+    def __init__(self, main_folder, supplement_folder, report_path, hash_method, dry_run=True):
         super().__init__()
         self.main_folder = main_folder
         self.supplement_folder = supplement_folder
         self.report_path = report_path
         self.hash_method = hash_method
+        self.dry_run = dry_run
     def run(self):
         try:
-            self.log_signal.emit(f"开始生成增补报告...\n")
-            compare.supplement_images(self.main_folder, self.supplement_folder, self.report_path, self.hash_method, dry_run=False)
-            self.log_signal.emit(f"增补报告生成完成: {self.report_path}\n")
+            self.log_signal.emit(f"开始生成增补报告...")
+            compare.supplement_images(self.main_folder, self.supplement_folder, self.report_path, self.hash_method, dry_run=self.dry_run)
+            self.log_signal.emit(f"增补报告生成完成: {self.report_path}")
             self.done_signal.emit(self.report_path)
         except Exception as e:
             tb = traceback.format_exc()
@@ -114,8 +143,6 @@ class DedupGui(QWidget):
         self.btn_generate_supp_report.clicked.connect(self.generate_supp_report_dialog)
         self.btn_load = QPushButton('加载报告')
         self.btn_load.clicked.connect(self.load_report)
-        self.btn_export = QPushButton('导出删除清单')
-        self.btn_export.clicked.connect(self.export_delete_list)
         self.btn_delete = QPushButton('直接删除')
         self.btn_delete.clicked.connect(self.delete_files)
         self.btn_select_all = QPushButton('所有组全选')
@@ -128,7 +155,6 @@ class DedupGui(QWidget):
         btn_layout.addWidget(self.btn_generate_report)
         btn_layout.addWidget(self.btn_generate_supp_report)
         btn_layout.addWidget(self.btn_load)
-        btn_layout.addWidget(self.btn_export)
         btn_layout.addWidget(self.btn_delete)
         btn_layout.addWidget(self.btn_select_all)
         btn_layout.addWidget(self.btn_unselect_all)
@@ -146,14 +172,14 @@ class DedupGui(QWidget):
         self.progress.setMaximum(0)  # 不确定进度时为忙等待
         self.progress.hide()
         layout.addWidget(self.progress)
-        # 搜索框
-        search_layout = QHBoxLayout()
-        self.search_box = QLineEdit()
-        self.search_box.setPlaceholderText('搜索分组...')
-        self.search_box.textChanged.connect(self.filter_groups)
-        search_layout.addWidget(QLabel('分组搜索:'))
-        search_layout.addWidget(self.search_box)
-        layout.addLayout(search_layout)
+        # 移除分组搜索区
+        # search_layout = QHBoxLayout()
+        # self.search_box = QLineEdit()
+        # self.search_box.setPlaceholderText('搜索分组...')
+        # self.search_box.textChanged.connect(self.filter_groups)
+        # search_layout.addWidget(QLabel('分组搜索:'))
+        # search_layout.addWidget(self.search_box)
+        # layout.addLayout(search_layout)
         # TabWidget
         self.tabs = QTabWidget()
         # 图片Tab
@@ -311,16 +337,6 @@ class DedupGui(QWidget):
         self.current_img_group = idx
         self.show_group(idx)
 
-    def filter_groups(self, text):
-        # 只对图片分组做搜索
-        self.group_list.clear()
-        for i, group in enumerate(self.img_groups):
-            label = f'重复组{i+1} ({len(group)}张)'
-            if text.strip() == '' or text.strip() in label:
-                self.group_list.addItem(label)
-        if self.group_list.count() > 0:
-            self.group_list.setCurrentRow(0)
-
     def show_group(self, idx):
         for i in reversed(range(self.img_layout.count())):
             w = self.img_layout.itemAt(i).widget()
@@ -381,31 +397,29 @@ class DedupGui(QWidget):
             # 视频缩略图
             thumb = get_video_thumbnail(path)
             thumb_label = QLabel()
-            if thumb and os.path.exists(thumb):
-                pix = QPixmap(thumb)
-                if not pix.isNull():
-                    pix = pix.scaled(160, 120, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                    thumb_label.setPixmap(pix)
-                    thumb_label.setCursor(Qt.PointingHandCursor)
-                    def show_big_thumb(p=thumb):
-                        dlg = QDialog(self)
-                        dlg.setWindowTitle(os.path.basename(path))
-                        vbox = QVBoxLayout(dlg)
-                        img_label = QLabel()
-                        pix2 = QPixmap(p)
-                        if not pix2.isNull():
-                            screen = QApplication.primaryScreen().availableGeometry()
-                            maxw, maxh = int(screen.width() * 0.8), int(screen.height() * 0.8)
-                            pix2 = pix2.scaled(maxw, maxh, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                            img_label.setPixmap(pix2)
-                        else:
-                            img_label.setText('无法加载缩略图')
-                        vbox.addWidget(img_label)
-                        dlg.resize( min(pix2.width()+40, 1200), min(pix2.height()+80, 900) )
-                        dlg.exec_()
-                    thumb_label.mousePressEvent = lambda e, f=show_big_thumb: f()
-                else:
-                    thumb_label.setText('无缩略图')
+            if thumb and not thumb.isNull():
+                pix = thumb
+                pix = pix.scaled(160, 120, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                thumb_label.setPixmap(pix)
+                thumb_label.setCursor(Qt.PointingHandCursor)
+                def show_big_thumb(p=path):
+                    dlg = QDialog(self)
+                    dlg.setWindowTitle(os.path.basename(p))
+                    vbox = QVBoxLayout(dlg)
+                    img_label = QLabel()
+                    # 生成大尺寸缩略图
+                    big_thumb = get_video_thumbnail(p, width=800, height=600)
+                    if big_thumb and not big_thumb.isNull():
+                        screen = QApplication.primaryScreen().availableGeometry()
+                        maxw, maxh = int(screen.width() * 0.8), int(screen.height() * 0.8)
+                        big_thumb = big_thumb.scaled(maxw, maxh, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                        img_label.setPixmap(big_thumb)
+                    else:
+                        img_label.setText('无法加载缩略图')
+                    vbox.addWidget(img_label)
+                    dlg.resize( min(big_thumb.width()+40 if big_thumb else 600, 1200), min(big_thumb.height()+80 if big_thumb else 400, 900) )
+                    dlg.exec_()
+                thumb_label.mousePressEvent = lambda e, f=show_big_thumb: f()
             else:
                 thumb_label.setText('无缩略图')
             row.addWidget(thumb_label)
@@ -492,27 +506,6 @@ class DedupGui(QWidget):
         self.vid_checked[idx] = set()
         self.show_vid_group(idx)
 
-    def export_delete_list(self):
-        delete_list = []
-        for idx, group in enumerate(self.img_groups):
-            for path in group:
-                if path not in self.img_checked[idx]:
-                    delete_list.append(path)
-        for idx, group in enumerate(self.vid_groups):
-            for path in group:
-                if path not in self.vid_checked[idx]:
-                    delete_list.append(path)
-        if not delete_list:
-            QMessageBox.information(self, '导出删除清单', '没有需要删除的文件。')
-            return
-        save_path, _ = QFileDialog.getSaveFileName(self, '保存删除清单', 'delete_list.txt', 'Text Files (*.txt)')
-        if not save_path:
-            return
-        with open(save_path, 'w', encoding='utf-8') as f:
-            for path in delete_list:
-                f.write(path + '\n')
-        QMessageBox.information(self, '导出删除清单', f'已导出 {len(delete_list)} 条删除清单到\n{save_path}')
-
     def delete_files(self):
         delete_list = []
         for idx, group in enumerate(self.img_groups):
@@ -576,10 +569,80 @@ class DedupGui(QWidget):
                     self.supplement_img_files.append(l.strip())
                 elif mode == 'vid':
                     self.supplement_vid_files.append(l.strip())
+        # 图片缩略图列表
+        self.supplement_img_list.clear()
         for f in self.supplement_img_files:
-            self.supplement_img_list.addItem(f)
+            item_widget = QWidget()
+            hbox = QHBoxLayout(item_widget)
+            thumb = QPixmap(f)
+            if not thumb.isNull():
+                pix = thumb.scaled(80, 80, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                thumb_label = QLabel()
+                thumb_label.setPixmap(pix)
+                thumb_label.setCursor(Qt.PointingHandCursor)
+                def show_big_thumb(p=f):
+                    dlg = QDialog(self)
+                    dlg.setWindowTitle(os.path.basename(p))
+                    vbox = QVBoxLayout(dlg)
+                    img_label = QLabel()
+                    pix2 = QPixmap(p)
+                    if not pix2.isNull():
+                        screen = QApplication.primaryScreen().availableGeometry()
+                        maxw, maxh = int(screen.width() * 0.8), int(screen.height() * 0.8)
+                        pix2 = pix2.scaled(maxw, maxh, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                        img_label.setPixmap(pix2)
+                    else:
+                        img_label.setText('无法加载图片')
+                    vbox.addWidget(img_label)
+                    dlg.resize( min(pix2.width()+40, 1200), min(pix2.height()+80, 900) )
+                    dlg.exec_()
+                thumb_label.mousePressEvent = lambda e, f=show_big_thumb: f()
+                hbox.addWidget(thumb_label)
+            else:
+                hbox.addWidget(QLabel('无缩略图'))
+            hbox.addWidget(QLabel(f))
+            item_widget.setLayout(hbox)
+            list_item = QListWidgetItem()
+            list_item.setSizeHint(item_widget.sizeHint())
+            self.supplement_img_list.addItem(list_item)
+            self.supplement_img_list.setItemWidget(list_item, item_widget)
+        # 视频缩略图列表
+        self.supplement_vid_list.clear()
         for f in self.supplement_vid_files:
-            self.supplement_vid_list.addItem(f)
+            item_widget = QWidget()
+            hbox = QHBoxLayout(item_widget)
+            thumb = get_video_thumbnail(f)
+            if thumb and not thumb.isNull():
+                pix = thumb.scaled(80, 60, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                thumb_label = QLabel()
+                thumb_label.setPixmap(pix)
+                thumb_label.setCursor(Qt.PointingHandCursor)
+                def show_big_thumb(p=f):
+                    dlg = QDialog(self)
+                    dlg.setWindowTitle(os.path.basename(p))
+                    vbox = QVBoxLayout(dlg)
+                    img_label = QLabel()
+                    big_thumb = get_video_thumbnail(p, width=800, height=600)
+                    if big_thumb and not big_thumb.isNull():
+                        screen = QApplication.primaryScreen().availableGeometry()
+                        maxw, maxh = int(screen.width() * 0.8), int(screen.height() * 0.8)
+                        big_thumb = big_thumb.scaled(maxw, maxh, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                        img_label.setPixmap(big_thumb)
+                    else:
+                        img_label.setText('无法加载缩略图')
+                    vbox.addWidget(img_label)
+                    dlg.resize( min(big_thumb.width()+40 if big_thumb else 600, 1200), min(big_thumb.height()+80 if big_thumb else 400, 900) )
+                    dlg.exec_()
+                thumb_label.mousePressEvent = lambda e, f=show_big_thumb: f()
+                hbox.addWidget(thumb_label)
+            else:
+                hbox.addWidget(QLabel('无缩略图'))
+            hbox.addWidget(QLabel(f))
+            item_widget.setLayout(hbox)
+            list_item = QListWidgetItem()
+            list_item.setSizeHint(item_widget.sizeHint())
+            self.supplement_vid_list.addItem(list_item)
+            self.supplement_vid_list.setItemWidget(list_item, item_widget)
 
 
     def move_supplement_files(self, which):
@@ -597,22 +660,59 @@ class DedupGui(QWidget):
         if not target_dir:
             QMessageBox.warning(self, '批量移动', f'未能从报告中识别出增补{label}的目标目录。')
             return
+        if not os.path.exists(target_dir):
+            try:
+                os.makedirs(target_dir, exist_ok=True)
+            except Exception as e:
+                QMessageBox.warning(self, '批量移动', f'目标目录不存在且创建失败：\n{target_dir}\n错误信息：{e}')
+                return
+        # 新增：损坏文件集中到一个子文件夹
+        corrupt_dir = os.path.join(target_dir, '损坏文件')
+        if not os.path.exists(corrupt_dir):
+            os.makedirs(corrupt_dir, exist_ok=True)
         failed = []
+        corrupt = []
         for f in files:
             try:
                 if os.path.exists(f):
+                    is_corrupt = False
+                    if which == 'img':
+                        from PIL import Image
+                        try:
+                            with Image.open(f) as im:
+                                im.verify()
+                        except Exception:
+                            is_corrupt = True
+                    elif which == 'vid':
+                        # 简单判断：文件过小或ffmpeg无法读取
+                        try:
+                            import subprocess
+                            result = subprocess.run([
+                                'ffmpeg', '-v', 'error', '-i', f, '-f', 'null', '-'],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
+                            if result.returncode != 0:
+                                is_corrupt = True
+                        except Exception:
+                            is_corrupt = True
                     base = os.path.basename(f)
-                    target = os.path.join(target_dir, base)
+                    if is_corrupt:
+                        target = os.path.join(corrupt_dir, base)
+                        corrupt.append(f)
+                    else:
+                        target = os.path.join(target_dir, base)
                     count = 1
                     while os.path.exists(target):
                         name, ext = os.path.splitext(base)
-                        target = os.path.join(target_dir, f"{name}_{count}{ext}")
+                        target = os.path.join(os.path.dirname(target), f"{name}_{count}{ext}")
                         count += 1
                     os.rename(f, target)
             except Exception as e:
                 failed.append((f, str(e)))
+        msg = f'成功移动 {len(files)-len(failed)} 个{label}到\n{target_dir}'
+        if corrupt:
+            msg += f'\n其中 {len(corrupt)} 个疑似损坏文件已移动到: {corrupt_dir}'
         if not failed:
-            QMessageBox.information(self, '批量移动', f'成功移动 {len(files)} 个{label}到\n{target_dir}')
+            QMessageBox.information(self, '批量移动', msg)
         else:
             QMessageBox.warning(self, '部分移动失败', f'有 {len(failed)} 个{label}移动失败。\n' + '\n'.join(f[0] for f in failed))
 
@@ -620,15 +720,16 @@ class DedupGui(QWidget):
         folder = QFileDialog.getExistingDirectory(self, '选择待去重文件夹')
         if not folder:
             return
+        self.log_box.clear()
+        self.log_box.append(f'已选择待去重文件夹: {folder}')
         report_path, _ = QFileDialog.getSaveFileName(self, '保存报告为', 'report.txt', 'Text Files (*.txt)')
         if not report_path:
             return
-        hash_method, ok = QInputDialog.getItem(self, '选择哈希算法', '哈希算法：', ['md5', 'sha1'], 0, False)
-        if not ok:
-            return
+        hash_method = 'md5'
+        # hash_method, ok = QInputDialog.getItem(self, '选择哈希算法', '哈希算法：', ['md5', 'sha1'], 0, False)
+        # if not ok:
+        #    return
         self.progress.show()
-        self.log_box.clear()
-        self.log_box.append(f'开始生成去重报告...')
         self.thread = ReportThread(folder, report_path, hash_method)
         self.thread.log_signal.connect(self.log_box.append)
         self.thread.done_signal.connect(self.on_report_done)
@@ -638,19 +739,24 @@ class DedupGui(QWidget):
         main_folder = QFileDialog.getExistingDirectory(self, '选择主文件夹')
         if not main_folder:
             return
+        self.log_box.clear()
+        self.log_box.append(f'已选择主文件夹: {main_folder}')
         supplement_folder = QFileDialog.getExistingDirectory(self, '选择补充文件夹')
         if not supplement_folder:
+            return
+        self.log_box.append(f'已选择补充文件夹: {supplement_folder}')
+        if os.path.abspath(main_folder) == os.path.abspath(supplement_folder):
+            QMessageBox.warning(self, '参数错误', '主文件夹和补充文件夹不能相同，请重新选择！')
             return
         report_path, _ = QFileDialog.getSaveFileName(self, '保存增补报告为', 'supplement_report.txt', 'Text Files (*.txt)')
         if not report_path:
             return
-        hash_method, ok = QInputDialog.getItem(self, '选择哈希算法', '哈希算法：', ['md5', 'sha1'], 0, False)
-        if not ok:
-            return
+        hash_method = 'md5'
+        # hash_method, ok = QInputDialog.getItem(self, '选择哈希算法', '哈希算法：', ['md5', 'sha1'], 0, False)
+        # if not ok:
+        #    return
         self.progress.show()
-        self.log_box.clear()
-        self.log_box.append(f'开始生成增补报告...')
-        self.supp_thread = SupplementReportThread(main_folder, supplement_folder, report_path, hash_method)
+        self.supp_thread = SupplementReportThread(main_folder, supplement_folder, report_path, hash_method, dry_run=True)
         self.supp_thread.log_signal.connect(self.log_box.append)
         self.supp_thread.done_signal.connect(self.on_report_done)
         self.supp_thread.start()

@@ -43,7 +43,6 @@ def get_image_size(image_path):
             logger.warning(f"无法读取图片尺寸, 错误: {e}")
         else:
             logger.warning(f"无法读取图片尺寸: {image_path}, 错误: {e}")
-        #   logger.warning(f"无法读取图片尺寸: {image_path}, 错误: {e}")
         return None
 
 
@@ -186,8 +185,6 @@ def supplement_images(main_folder, supplement_folder, report_path, hash_method='
     # 时间戳目录
     timestamp = time.strftime('%Y%m%d_%H%M%S')
     supplement_dir = os.path.join(main_folder, f'补充图片_{timestamp}')
-    if not dry_run:
-        os.makedirs(supplement_dir, exist_ok=True)
     added = []
     skipped = []
     to_add = []
@@ -217,6 +214,8 @@ def supplement_images(main_folder, supplement_folder, report_path, hash_method='
         if not dry_run:
             raise RuntimeError("磁盘空间不足，无法完成增补操作！")
     # 执行复制
+    if to_add and not dry_run:
+        os.makedirs(supplement_dir, exist_ok=True)
     for src, dst, _ in to_add:
         if dry_run:
             logger.info(f"[DRY-RUN] 预演增补: {src} -> {dst}")
@@ -228,16 +227,17 @@ def supplement_images(main_folder, supplement_folder, report_path, hash_method='
                 logger.info(f"增补图片: {src} -> {dst}")
             except Exception as e:
                 logger.error(f"复制图片失败: {src} -> {dst}, 错误: {e}")
+    # 若无增补图片且文件夹已创建，删除空文件夹
+    if not added and not dry_run and os.path.exists(supplement_dir) and not os.listdir(supplement_dir):
+        os.rmdir(supplement_dir)
     # 视频增补（修正：避免重复增补）
     main_videos = collect_videos(main_folder)
     supplement_videos = collect_videos(supplement_folder)
-    # 用文件名+大小做唯一性判断（可扩展为哈希）
     main_video_keys = set((v['name'], v['size']) for v in main_videos)
     mp4_dir = os.path.join(main_folder, f'MP4_{timestamp}')
-    if not dry_run:
-        os.makedirs(mp4_dir, exist_ok=True)
     video_added = []
     video_skipped = []
+    to_add_vid = []
     for meta in supplement_videos:
         key = (meta['name'], meta['size'])
         if key in main_video_keys:
@@ -251,16 +251,23 @@ def supplement_images(main_folder, supplement_folder, report_path, hash_method='
             name, ext = os.path.splitext(base)
             target = os.path.join(mp4_dir, f"{name}_{count}{ext}")
             count += 1
+        to_add_vid.append((meta['path'], target))
+    if to_add_vid and not dry_run:
+        os.makedirs(mp4_dir, exist_ok=True)
+    for src, dst in to_add_vid:
         if dry_run:
-            logger.info(f"[DRY-RUN] 预演增补视频: {meta['path']} -> {target}")
-            video_added.append(meta['path'])  # 记录源路径
+            logger.info(f"[DRY-RUN] 预演增补视频: {src} -> {dst}")
+            video_added.append(src)  # 记录源路径
         else:
             try:
-                shutil.copy2(meta['path'], target)
-                video_added.append(meta['path'])  # 记录源路径
-                logger.info(f"增补视频: {meta['path']} -> {target}")
+                shutil.copy2(src, dst)
+                video_added.append(src)  # 记录源路径
+                logger.info(f"增补视频: {src} -> {dst}")
             except Exception as e:
-                logger.error(f"复制视频失败: {meta['path']} -> {target}, 错误: {e}")
+                logger.error(f"复制视频失败: {src} -> {dst}, 错误: {e}")
+    # 若无增补视频且文件夹已创建，删除空文件夹
+    if not video_added and not dry_run and os.path.exists(mp4_dir) and not os.listdir(mp4_dir):
+        os.rmdir(mp4_dir)
     # 3. 输出报告
     with open(report_path, 'w', encoding='utf-8') as f:
         if dry_run:
