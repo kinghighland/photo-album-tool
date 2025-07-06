@@ -8,6 +8,7 @@ __pycache__/
 .thumbnails/*
 # C extensions
 *.so
+.vscode/settings.json
 
 delete_list.txt
 report.txt
