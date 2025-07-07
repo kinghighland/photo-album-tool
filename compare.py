@@ -1,12 +1,15 @@
-import os
-import hashlib
-import logging
 from PIL import Image, UnidentifiedImageError
 from multiprocessing import Pool, cpu_count
+import signal
+import sys
+import os
+import re
 import time
 import shutil
 import psutil
-import re
+import hashlib
+import logging
+
 # 日志配置
 logging.basicConfig(
     level=logging.INFO,
@@ -156,22 +159,105 @@ def get_image_size(image_path):
                 return None
         logger.warning(f"无法读取图片尺寸: {image_path}, 错误: {e}")
         return None
+    
+def safe_multiprocess_operation(func, items, max_workers=None):
+    """
+    安全的多进程操作，包含完善的错误处理和资源管理
+    """
+    if not items:
+        return []
+    
+    if max_workers is None:
+        max_workers = min(cpu_count(), len(items), 8)  # 限制最大进程数避免资源过度消耗
+    
+    # 如果任务数量很少，直接单进程处理
+    if len(items) < max_workers * 2:
+        logger.info("任务数量较少，使用单进程处理")
+        return [func(item) for item in items]
+    
+    pool = None
+    try:
+        logger.info(f"使用 {max_workers} 个进程处理 {len(items)} 个任务")
+        
+        # 创建进程池
+        pool = Pool(max_workers)
+        
+        # 使用map_async以便可以设置超时和更好的错误处理
+        result = pool.map_async(func, items)
+        
+        # 等待结果，设置一个合理的超时时间
+        timeout = max(300, len(items) * 2)  # 最少5分钟，或每个任务2秒
+        results = result.get(timeout=timeout)
+        
+        return results
+        
+    except KeyboardInterrupt:
+        logger.warning("用户中断了多进程操作")
+        if pool:
+            pool.terminate()
+            pool.join()
+        raise
+    except Exception as e:
+        logger.error(f"多进程操作失败: {e}")
+        if pool:
+            pool.terminate()
+            pool.join()
+        
+        # 回退到单进程处理
+        logger.info("回退到单进程处理")
+        results = []
+        for i, item in enumerate(items):
+            try:
+                result = func(item)
+                results.append(result)
+                
+                # 每处理100个项目报告一次进度
+                if (i + 1) % 100 == 0:
+                    logger.info(f"单进程处理进度: {i+1}/{len(items)}")
+                    
+            except Exception as item_error:
+                logger.error(f"处理项目失败: {item}, 错误: {item_error}")
+                results.append(None)
+        
+        return results
+    finally:
+        # 确保进程池被正确关闭
+        if pool:
+            try:
+                pool.close()
+                pool.join()
+            except Exception as e:
+                logger.error(f"关闭进程池时发生错误: {e}")
+
+# 添加信号处理器来优雅地处理中断
+def signal_handler(signum, frame):
+    logger.info("接收到中断信号，正在清理资源...")
+    sys.exit(0)
+
+# 在模块加载时注册信号处理器
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
+
 def collect_images(folder, exts=None):
     """
     递归收集文件夹下所有图片文件路径、大小、尺寸。
     返回：[{path, size, shape}...]
+    使用改进的多进程处理来收集图片
     """
     if exts is None:
         exts = {'.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tiff', '.avif'}
+    
     image_files = []
     for root, _, files in os.walk(folder):
         for file in files:
             if os.path.splitext(file)[1].lower() in exts:
                 image_files.append(os.path.join(root, file))
+    
     logger.info(f"共发现图片文件 {len(image_files)} 张")
-    # 多进程读取图片尺寸
-    with Pool(cpu_count()) as pool:
-        sizes = pool.map(get_image_size, image_files)
+    
+    # 使用安全的多进程操作
+    sizes = safe_multiprocess_operation(get_image_size, image_files)
+    
     image_meta = []
     for path, shape in zip(image_files, sizes):
         try:
@@ -180,6 +266,7 @@ def collect_images(folder, exts=None):
             logger.warning(f"无法读取文件大小: {path}, 错误: {e}")
             continue
         image_meta.append({'path': path, 'size': size, 'shape': shape})
+    
     logger.info(f"成功读取元数据图片数: {len(image_meta)}")
     return image_meta
 def collect_videos(folder, exts=None):

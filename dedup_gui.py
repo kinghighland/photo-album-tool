@@ -11,6 +11,7 @@ from PyQt5.QtGui import QPixmap
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QPalette, QColor
 from PIL import Image, UnidentifiedImageError
+Image.MAX_IMAGE_PIXELS = 1400000000  # 例如允许4.2亿像素图片
 
 import re
 import threading
@@ -125,28 +126,55 @@ class ReportThread(QThread):
     log_signal = pyqtSignal(str)
     done_signal = pyqtSignal(str)
     data_signal = pyqtSignal(object)
+    error_signal = pyqtSignal(str)
+
     def __init__(self, folder, report_path, hash_method, lang):
         super().__init__()
         self.folder = folder
         self.report_path = report_path
         self.hash_method = hash_method
         self.lang = lang
+        self._is_cancelled = False
+
     def run(self):
         try:
             import compare
             compare.LANG = self.lang
             self.log_signal.emit(tr('start_dedup'))
+            
             def log_cb(msg):
-                self.log_signal.emit(msg)
+                if not self._is_cancelled:
+                    self.log_signal.emit(msg)
+            
             def prog_cb(val):
-                self.progress = val
-            result = compare.find_duplicates(self.folder, self.report_path, self.hash_method, dry_run=False, log_callback=log_cb, progress_callback=prog_cb)
-            self.data_signal.emit(result)
-            self.log_signal.emit(tr('dedup_done', path=self.report_path))
-            self.done_signal.emit(self.report_path)
+                if not self._is_cancelled:
+                    self.progress = val
+            
+            result = compare.find_duplicates(
+                self.folder, 
+                self.report_path, 
+                self.hash_method, 
+                dry_run=False, 
+                log_callback=log_cb, 
+                progress_callback=prog_cb
+            )
+            
+            if not self._is_cancelled:
+                self.data_signal.emit(result)
+                self.log_signal.emit(tr('dedup_done', path=self.report_path))
+                self.done_signal.emit(self.report_path)
+                
+        except KeyboardInterrupt:
+            self.log_signal.emit("Task canceled by user")
         except Exception as e:
             tb = traceback.format_exc()
-            self.log_signal.emit(tr('error', err=e, tb=tb))
+            error_msg = f"Task failed: {str(e)}"
+            self.log_signal.emit(error_msg)
+            self.error_signal.emit(f"{error_msg}\n\nDetailed Error:\n{tb}")
+    
+    def cancel(self):
+        self._is_cancelled = True
+
 class SupplementReportThread(QThread):
     log_signal = pyqtSignal(str)
     done_signal = pyqtSignal(str)
@@ -907,7 +935,8 @@ class DedupGui(QWidget):
                 if os.path.exists(f):
                     is_corrupt = False
                     if which == 'img':
-                        from PIL import Image
+                        #from PIL import Image
+                        #Image.MAX_IMAGE_PIXELS = 200000000  # 例如允许2亿像素图片
                         try:
                             with Image.open(f) as im:
                                 im.verify()
@@ -1037,8 +1066,15 @@ class DedupGui(QWidget):
         self.thread = ReportThread(folder, report_path, hash_method, LANG)
         self.thread.data_signal.connect(self.on_dedup_data)
         self.thread.done_signal.connect(self.on_report_done)
+        self.thread.error_signal.connect(self.on_thread_error)  
         self.thread.start()
 
+    def on_thread_error(self, error_msg):
+        """处理线程执行错误"""
+        self.progress.hide()
+        QMessageBox.critical(self, "Execuation Error", error_msg)
+        self.log_box.append("❌ Execuation Failed")
+        
     def generate_supp_report_dialog(self):
         main_folder = QFileDialog.getExistingDirectory(self, tr('select_main_folder'))
         if not main_folder:
@@ -1443,7 +1479,8 @@ class DedupGui(QWidget):
                     img_corrupt += 1
                 else:
                     try:
-                        from PIL import Image
+                        #from PIL import Image
+                        #Image.MAX_IMAGE_PIXELS = 200000000  # 例如允许2亿像素图片
                         with Image.open(p) as im:
                             im.verify()
                     except Exception:
