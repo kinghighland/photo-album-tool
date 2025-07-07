@@ -1,22 +1,56 @@
 import sys
 import os
+import subprocess
+
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QListWidget, QListWidgetItem,
     QFileDialog, QCheckBox, QMessageBox, QScrollArea, QGroupBox, QDialog, QComboBox, QTabWidget, QLineEdit, QFrame,
-    QTextEdit, QProgressBar, QInputDialog, QMenu
+    QTextEdit, QProgressBar, QInputDialog, QMenu, QSplitter
 )
 from PyQt5.QtGui import QPixmap
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QPalette, QColor
-import subprocess
 from PIL import Image, UnidentifiedImageError
+
 import re
 import threading
 import traceback
 import importlib.util
 import tempfile
 import time
-from compare import find_duplicates, supplement_images, collect_images, collect_videos
+import logging
+
+# 在文件开头添加全局变量
+FFMPEG_AVAILABLE = None
+
+# 添加logger定义
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[
+        logging.FileHandler('photo_tool.log', encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)  # 新增logger定义
+
+from compare import find_duplicates, supplement_images #, collect_images, collect_videos 这两个函数包含多进程代码，在GUI环境中会导致pickle错误
+
+
+def check_ffmpeg_available():
+    """检查系统是否安装了ffmpeg"""
+    try:
+        result = subprocess.run(
+            ['ffmpeg', '-version'], 
+            stdout=subprocess.DEVNULL, 
+            stderr=subprocess.DEVNULL, 
+            timeout=5,
+            check=True
+        )
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+    
 
 THUMBNAIL_DIR = '.thumbnails'
 os.makedirs(THUMBNAIL_DIR, exist_ok=True)
@@ -25,32 +59,68 @@ spec = importlib.util.spec_from_file_location("compare", "compare.py")
 compare = importlib.util.module_from_spec(spec)
 sys.modules["compare"] = compare
 spec.loader.exec_module(compare)
+
 def get_video_thumbnail(video_path, width=240, height=180):
     """
-    用 ffmpeg 生成视频缩略图，返回 QPixmap。
+    改进的视频缩略图生成，包含ffmpeg检查
     """
-    import subprocess
-    import os
-    from PyQt5.QtGui import QPixmap
-    import tempfile
+    global FFMPEG_AVAILABLE
+    
+    # 懒加载检查ffmpeg
+    if FFMPEG_AVAILABLE is None:
+        FFMPEG_AVAILABLE = check_ffmpeg_available()
+        if not FFMPEG_AVAILABLE:
+            logger.warning("未检测到ffmpeg，视频缩略图功能将不可用")
+    
+    # 如果ffmpeg不可用，返回空的QPixmap
+    if not FFMPEG_AVAILABLE:
+        return QPixmap()
+    
     if not os.path.exists(video_path):
         return QPixmap()
+    
     with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
         thumb_path = tmp.name
+    
     try:
-        # 取第1秒帧，缩略图尺寸 width x height
         cmd = [
             'ffmpeg', '-y', '-i', video_path, '-ss', '00:00:01.000', '-vframes', '1',
-            '-vf', f'scale={width}:{height}:force_original_aspect_ratio=decrease', thumb_path
+            '-vf', f'scale={width}:{height}:force_original_aspect_ratio=decrease', 
+            thumb_path
         ]
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-        pix = QPixmap(thumb_path)
-    except Exception:
+        
+        result = subprocess.run(
+            cmd, 
+            stdout=subprocess.DEVNULL, 
+            stderr=subprocess.DEVNULL, 
+            timeout=10,  # 添加10秒超时
+            check=True
+        )
+        
+        if os.path.exists(thumb_path) and os.path.getsize(thumb_path) > 0:
+            pix = QPixmap(thumb_path)
+        else:
+            pix = QPixmap()
+            
+    except subprocess.TimeoutExpired:
+        logger.warning(f"生成视频缩略图超时: {video_path}")
+        pix = QPixmap()
+    except subprocess.CalledProcessError:
+        logger.warning(f"ffmpeg处理视频失败: {video_path}")
+        pix = QPixmap()
+    except Exception as e:
+        logger.warning(f"生成视频缩略图时发生错误: {video_path}, 错误: {e}")
         pix = QPixmap()
     finally:
-        if os.path.exists(thumb_path):
-            os.remove(thumb_path)
+        # 确保临时文件被删除
+        try:
+            if os.path.exists(thumb_path):
+                os.remove(thumb_path)
+        except OSError:
+            pass
+    
     return pix
+
 class ReportThread(QThread):
     log_signal = pyqtSignal(str)
     done_signal = pyqtSignal(str)
@@ -133,18 +203,19 @@ class ClickableLabel(QLabel):
             vbox.addWidget(img_label)
             dlg.resize( min(pix.width()+40, 1200), min(pix.height()+80, 900) )
             dlg.exec_()
+
 class DedupGui(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle('照片去重报告处理工具')
         self.resize(1100, 750)
         self.report_path = None
-        self.img_groups = []  # 每组是[图片路径...]
-        self.vid_groups = []  # 每组是[视频路径...]
+        self.img_groups = []
+        self.vid_groups = []
         self.current_img_group = 0
         self.current_vid_group = 0
-        self.img_checked = {}  # {group_idx: set(保留图片路径)}
-        self.vid_checked = {}  # {group_idx: set(保留视频路径)}
+        self.img_checked = {}
+        self.vid_checked = {}
         self.supplement_img_files = []
         self.supplement_vid_files = []
         self.supplement_img_target_dir = None
@@ -158,18 +229,24 @@ class DedupGui(QWidget):
         self.corrupt_img_files = []
         self._last_dedup_result = None
         self._last_supp_result = None
+        
         # 添加新的实例变量
-        self.img_group_details = {}  # 存储完整的图片组详细信息
-        self.vid_group_details = {}  # 存储完整的视频组详细信息
-        self.supplement_img_details = []  # 存储增补图片详细信息
-        self.supplement_vid_details = []  # 存储增补视频详细信息
-        self.skipped_img_details = []  # 存储跳过的图片详细信息
-        self.skipped_vid_details = []  # 存储跳过的视频详细信息
+        self.img_group_details = {}
+        self.vid_group_details = {}
+        self.supplement_img_details = []
+        self.supplement_vid_details = []
+        self.skipped_img_details = []
+        self.skipped_vid_details = []
+        
+        # 新增：存储文件夹信息的变量
+        self.folder_info_messages = []
         
         self.init_ui()
 
     def init_ui(self):
-        layout = QVBoxLayout(self)
+        # 使用QSplitter来实现可调整的布局
+        main_layout = QVBoxLayout(self)
+        
         # 语言切换区
         lang_layout = QHBoxLayout()
         self.lang_label = QLabel(tr('choose_language'))
@@ -180,7 +257,8 @@ class DedupGui(QWidget):
         lang_layout.addWidget(self.lang_label)
         lang_layout.addWidget(self.combo_lang)
         lang_layout.addStretch()
-        layout.addLayout(lang_layout)
+        main_layout.addLayout(lang_layout)
+        
         # 顶部操作区
         btn_layout = QHBoxLayout()
         self.btn_generate_report = QPushButton(tr('generate_report'))
@@ -207,18 +285,22 @@ class DedupGui(QWidget):
         btn_layout.addWidget(self.btn_unselect_all)
         btn_layout.addWidget(self.batch_select_label)
         btn_layout.addWidget(self.combo_strategy)
-        layout.addLayout(btn_layout)
-        # 日志输出区
-        self.log_box = QTextEdit()
-        self.log_box.setReadOnly(True)
-        self.log_box.setMaximumHeight(120)
-        layout.addWidget(self.log_box)
+        main_layout.addLayout(btn_layout)
+
+        # 创建主要的可调整布局分割器
+        splitter = QSplitter(Qt.Vertical)
+        
+        # 上部分：主要内容区域（TabWidget + 进度条）
+        upper_widget = QWidget()
+        upper_layout = QVBoxLayout(upper_widget)
+        
         # 进度条
         self.progress = QProgressBar()
         self.progress.setMinimum(0)
-        self.progress.setMaximum(0)  # 不确定进度时为忙等待
+        self.progress.setMaximum(0)
         self.progress.hide()
-        layout.addWidget(self.progress)
+        upper_layout.addWidget(self.progress)
+        
         # TabWidget
         self.tabs = QTabWidget()
         # 图片Tab
@@ -246,6 +328,7 @@ class DedupGui(QWidget):
         right.addWidget(self.scroll, 8)
         img_layout.addLayout(right, 8)
         self.tabs.addTab(img_tab, tr('img_tab'))
+        
         # 视频Tab
         vid_tab = QWidget()
         vid_layout = QHBoxLayout(vid_tab)
@@ -271,6 +354,7 @@ class DedupGui(QWidget):
         vid_right.addWidget(self.vid_scroll, 8)
         vid_layout.addLayout(vid_right, 8)
         self.tabs.addTab(vid_tab, tr('vid_tab'))
+        
         # 增补结果Tab
         self.supplement_tab = QWidget()
         supp_layout = QVBoxLayout(self.supplement_tab)
@@ -289,10 +373,40 @@ class DedupGui(QWidget):
         self.btn_move_vid_supp.clicked.connect(lambda: self.move_supplement_files('vid'))
         supp_layout.addWidget(self.btn_move_vid_supp)
         self.tabs.addTab(self.supplement_tab, tr('supp_tab'))
-        layout.addWidget(self.tabs)
+        upper_layout.addWidget(self.tabs)
+        
+        # 下部分：日志输出区
+        self.log_box = QTextEdit()
+        self.log_box.setReadOnly(True)
+        # 移除固定高度限制，让用户可以通过拖动调整
+        # self.log_box.setMaximumHeight(120)  # 删除这行
+        
+        # 将上下部分添加到分割器
+        splitter.addWidget(upper_widget)
+        splitter.addWidget(self.log_box)
+        
+        # 设置分割器的初始比例 (上部分占80%，日志区占20%)
+        splitter.setSizes([600, 150])
+        splitter.setStretchFactor(0, 1)  # 上部分可伸缩
+        splitter.setStretchFactor(1, 0)  # 日志区固定比例
+        
+        # 将分割器添加到主布局
+        main_layout.addWidget(splitter)
+        
+        # 检查系统依赖
+        self.check_system_dependencies()
+           
         import compare
         compare.LANG = LANG
 
+    def check_system_dependencies(self):
+        if not check_ffmpeg_available():
+            print("⚠️ ffmpeg 不可用，视频缩略图功能受限")
+            self.log_box.append("⚠️ 警告: 未检测到ffmpeg，视频缩略图功能将不可用")
+            self.log_box.append("   建议安装ffmpeg以获得完整功能")
+        else:
+           print("✅ ffmpeg 可用，视频功能正常")
+ 
     def apply_strategy(self):
         strategy = self.combo_strategy.currentText()
         for i, group in enumerate(self.img_groups):
@@ -313,6 +427,9 @@ class DedupGui(QWidget):
         path, _ = QFileDialog.getOpenFileName(self, tr('select_report'), '', tr('text_files'))
         if not path:
             return
+        # 加载报告时也清除之前的结果
+        self.clear_interface()
+        
         self.report_path = path
         # 检查是否为增补报告
         with open(path, 'r', encoding='utf-8') as f:
@@ -404,22 +521,32 @@ class DedupGui(QWidget):
             w = self.img_layout.itemAt(i).widget()
             if w:
                 w.setParent(None)
+        
         group = self.img_groups[idx]
         for path in group:
             row = QHBoxLayout()
             label = ClickableLabel(path)
             is_corrupt = False
+            
             if os.path.exists(path):
+                # 使用改进的图片验证方法
                 try:
-                    with Image.open(path) as im:
-                        im.verify()
-                    pix = QPixmap(path)
-                    if not pix.isNull():
-                        pix = pix.scaled(320, 320, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                        label.setPixmap(pix)
-                    else:
-                        label.setText(tr('no_thumbnail'))
-                except Exception:
+                    with Image.open(path) as img:
+                        img.load()  # 使用load()代替verify()
+                        # 验证成功，显示缩略图
+                        pix = QPixmap(path)
+                        if not pix.isNull():
+                            pix = pix.scaled(320, 320, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                            label.setPixmap(pix)
+                        else:
+                            label.setText(tr('no_thumbnail'))
+                except (IOError, OSError, UnidentifiedImageError):
+                    is_corrupt = True
+                    self.corrupt_img_files.append(path)
+                    label.setText(tr('corrupted'))
+                    label.setStyleSheet('color: red; font-weight: bold;')
+                except Exception as e:
+                    logger.warning(f"验证图片时发生错误: {path}, 错误: {e}")
                     is_corrupt = True
                     self.corrupt_img_files.append(path)
                     label.setText(tr('corrupted'))
@@ -748,7 +875,6 @@ class DedupGui(QWidget):
         # 更新统计区损坏图片数
         self.log_supplement_stats()
 
-
     def move_supplement_files(self, which):
         if which == 'img':
             files = self.supplement_img_files
@@ -820,12 +946,88 @@ class DedupGui(QWidget):
         else:
             QMessageBox.warning(self, tr('partial_move_failed'), f'{tr("partial_move_failed_msg")} {len(failed)} {label} {tr("move_failed")}.\\n' + '\\n'.join(f[0] for f in failed))
 
+    def clear_interface(self): 
+        """清除界面上所有任务结果显示"""
+        # 清除数据变量
+        self.img_groups = []
+        self.vid_groups = []
+        self.current_img_group = 0
+        self.current_vid_group = 0
+        self.img_checked = {}
+        self.vid_checked = {}
+        self.supplement_img_files = []
+        self.supplement_vid_files = []
+        self.supplement_img_target_dir = None
+        self.supplement_vid_target_dir = None
+        self.corrupt_img_files = []
+        self._last_dedup_result = None
+        self._last_supp_result = None
+        
+        # 清除详细信息数据
+        self.img_group_details = {}
+        self.vid_group_details = {}
+        self.supplement_img_details = []
+        self.supplement_vid_details = []
+        self.skipped_img_details = []
+        self.skipped_vid_details = []
+        
+        # 清除统计相关变量
+        self._last_supp_main_count = None
+        self._last_supp_supp_count = None
+        self._last_supp_corrupt_img = 0
+        self._last_supp_corrupt_vid = 0
+        
+        # 清除图片重复组列表
+        self.group_list.clear()
+        
+        # 清除视频重复组列表
+        self.vid_group_list.clear()
+        
+        # 清除图片显示区域
+        for i in reversed(range(self.img_layout.count())):
+            w = self.img_layout.itemAt(i).widget()
+            if w:
+                w.setParent(None)
+        
+        # 清除视频显示区域
+        for i in reversed(range(self.vid_layout.count())):
+            w = self.vid_layout.itemAt(i).widget()
+            if w:
+                w.setParent(None)
+        
+        # 清除增补图片列表
+        self.supplement_img_list.clear()
+        
+        # 清除增补视频列表
+        self.supplement_vid_list.clear()
+        
+        # 重置增补标签
+        self.supp_img_label.setText(tr('supp_img', count=0) + ' 张')
+        self.supp_vid_label.setText(tr('supp_vid', count=0) + ' 个')
+        
+        # 重置策略选择
+        self.combo_strategy.setCurrentIndex(0)
+        
+        # 切换到第一个页签
+        self.tabs.setCurrentIndex(0)
+
     def generate_report_dialog(self):
         folder = QFileDialog.getExistingDirectory(self, tr('select_target_folder'))
         if not folder:
             return
+        
+        # 清除界面上的上次任务结果
+        self.clear_interface()
+
+        # 清空之前的文件夹信息和日志
+        self.folder_info_messages = []
         self.log_box.clear()
-        self.log_box.append(f'{tr("selected_target_folder")}: {folder}')
+        
+        # 添加并保存文件夹信息
+        folder_msg = f'{tr("selected_target_folder")}: {folder}'
+        self.folder_info_messages.append(folder_msg)
+        self.log_box.append(folder_msg)
+        
         report_path, _ = QFileDialog.getSaveFileName(self, tr('save_report_as'), 'report.txt', tr('text_files'))
         if not report_path:
             return
@@ -841,12 +1043,28 @@ class DedupGui(QWidget):
         main_folder = QFileDialog.getExistingDirectory(self, tr('select_main_folder'))
         if not main_folder:
             return
+        
+        # 清除界面上的上次任务结果
+        self.clear_interface()
+        
+        # 清空之前的文件夹信息和日志
+        self.folder_info_messages = []
         self.log_box.clear()
-        self.log_box.append(f'{tr("selected_main_folder")}: {main_folder}')
+        
+        # 添加并保存主文件夹信息
+        main_msg = f'{tr("selected_main_folder")}: {main_folder}'
+        self.folder_info_messages.append(main_msg)
+        self.log_box.append(main_msg)
+        
         supplement_folder = QFileDialog.getExistingDirectory(self, tr('select_supp_folder'))
         if not supplement_folder:
             return
-        self.log_box.append(f'{tr("selected_supp_folder")}: {supplement_folder}')
+        
+        # 添加并保存补充文件夹信息
+        supp_msg = f'{tr("selected_supp_folder")}: {supplement_folder}'
+        self.folder_info_messages.append(supp_msg)
+        self.log_box.append(supp_msg)
+        
         if os.path.abspath(main_folder) == os.path.abspath(supplement_folder):
             QMessageBox.warning(self, tr('param_error'), tr('main_supp_same'))
             return
@@ -1005,11 +1223,46 @@ class DedupGui(QWidget):
             self.progress.hide()
 
     def _update_log(self, log_messages):
-        """更新日志显示"""
+        """更新日志显示，只显示关键进展信息，同时保留文件夹信息"""
+        # 先保存文件夹信息，然后清空日志
+        folder_info = self.folder_info_messages.copy()
         self.log_box.clear()
+        
+        # 重新添加文件夹信息
+        for msg in folder_info:
+            self.log_box.append(msg)
+        
+        # 如果有文件夹信息，添加一个分隔符
+        if folder_info:
+            self.log_box.append("─" * 50)
+        
+        # 定义要显示的关键信息模式
+        key_patterns = [
+            # 任务开始/完成
+            r'正在扫描|Scanning|发现.*文件|Found.*files',
+            r'正在分析|Analyzing|分析完成|Analysis complete',
+            r'去重完成|报告已保存|Deduplication complete|Report saved',
+            r'报告生成完成|Report generation complete',
+            
+            # 统计信息
+            r'统计.*去重|stat.*dedup|总扫描|Total scanned',
+            
+            # 错误和警告
+            r'错误|Error|警告|Warning|失败|Failed',
+            
+            # 任务状态
+            r'开始.*任务|Starting.*task|完成.*任务|Completed.*task'
+        ]
+        
         for msg in log_messages:
-            # 过滤掉冗余的调试信息
-            if not re.search(r'正在处理分组|group_processing|Processing group|DEBUG', msg, re.IGNORECASE):
+            # 检查是否是关键信息
+            should_display = False
+            for pattern in key_patterns:
+                if re.search(pattern, msg, re.IGNORECASE):
+                    should_display = True
+                    break
+            
+            if should_display:
                 self.log_box.append(msg)
 
     def _update_dedup_stats(self, stats):
@@ -1120,7 +1373,6 @@ class DedupGui(QWidget):
         self.supp_img_label.setText(tr('supp_img', count=len(self.supplement_img_files)) + ' 张')
         self.supp_vid_label.setText(tr('supp_vid', count=len(self.supplement_vid_files)) + ' 个')
     
-
     def _update_supplement_stats(self, stats):
         """更新增补统计信息"""
         self._last_report_end_time = time.time()
@@ -1134,31 +1386,40 @@ class DedupGui(QWidget):
     def log_dedup_stats(self, from_data=False):
         if from_data and self._last_dedup_result:
             stats = self._last_dedup_result.get('stats', {})
-            img_total = stats.get('total_images_scanned', 0)   # 主动用 dedup 统计字段
-            vid_total = stats.get('total_videos_scanned', 0)
+            
+            # 直接从stats获取扫描总数，不再调用collect_images
+            img_scanned = stats.get('total_images_scanned', 0)
+            vid_scanned = stats.get('total_videos_scanned', 0)
+            
+            # 计算可删除的文件数
             img_del = sum(len(g)-1 for g in self.img_groups if len(g)>1)
             vid_del = sum(len(g)-1 for g in self.vid_groups if len(g)>1)
+            
+            # 计算可删除文件的大小
             img_del_size = 0
             img_corrupt = len(self.corrupt_img_files)
             for group_idx, group in enumerate(self.img_groups):
                 if group_idx in self.img_group_details:
-                    for file_info in self.img_group_details[group_idx][1:]:
+                    for file_info in self.img_group_details[group_idx][1:]:  # 跳过第一个文件
                         img_del_size += file_info.get('size', 0)
+            
             vid_del_size = 0
             vid_corrupt = 0
             for group_idx, group in enumerate(self.vid_groups):
                 if group_idx in self.vid_group_details:
-                    for file_info in self.vid_group_details[group_idx][1:]:
+                    for file_info in self.vid_group_details[group_idx][1:]:  # 跳过第一个文件
                         vid_del_size += file_info.get('size', 0)
                     for file_info in self.vid_group_details[group_idx]:
                         if not os.path.exists(file_info['path']):
                             vid_corrupt += 1
+            
             elapsed = None
             if self._last_report_start_time and self._last_report_end_time:
                 elapsed = self._last_report_end_time - self._last_report_start_time
+            
             msg = f"{tr('stat_dedup')}"
-            msg += f"\n  {tr('img_total', count=img_total)}, {tr('img_del', count=img_del)}, {tr('img_save', size=img_del_size/1024/1024)}, {tr('img_corrupt', count=img_corrupt)}"
-            msg += f"\n  {tr('vid_total', count=vid_total)}, {tr('vid_del', count=vid_del)}, {tr('vid_save', size=vid_del_size/1024/1024)}, {tr('vid_corrupt', count=vid_corrupt)}"
+            msg += f"\n  {tr('img_total', count=img_scanned)}, {tr('img_del', count=img_del)}, {tr('img_save', size=img_del_size/1024/1024)}, {tr('img_corrupt', count=img_corrupt)}"
+            msg += f"\n  {tr('vid_total', count=vid_scanned)}, {tr('vid_del', count=vid_del)}, {tr('vid_save', size=vid_del_size/1024/1024)}, {tr('vid_corrupt', count=vid_corrupt)}"
             if elapsed:
                 msg += f"\n  {tr('elapsed', sec=elapsed)}"
             self.log_box.append(msg)
@@ -1330,7 +1591,7 @@ TRANSLATIONS = {
         'select_main_folder': '选择主文件夹',
         'select_supp_folder': '选择补充文件夹',
         'select_target_folder': '选择待去重文件夹',
-        'save_report_as': '保存报告为',
+        'save_dedup_report_as': '保存去重报告为',
         'save_supp_report_as': '保存增补报告为',
         'text_files': 'Text Files (*.txt)',
         'param_error': '参数错误',
@@ -1374,7 +1635,7 @@ TRANSLATIONS = {
         'supp_vid_save': '预计增补空间: {size:.2f} MB',
         'supp_vid_corrupt': '疑似损坏视频: {count}',
         'elapsed': '分析/报告生成耗时: {sec:.1f} 秒',
-        'report_done': '报告生成完成，自动加载报告...',
+        'report_done': '报告生成完成',
         'start_dedup': '开始生成去重报告...',
         'dedup_done': '报告生成完成: {path}',
         'start_supp': '开始生成增补报告...',
@@ -1425,7 +1686,7 @@ TRANSLATIONS = {
         'select_main_folder': 'Select Main Folder',
         'select_supp_folder': 'Select Supplement Folder',
         'select_target_folder': 'Select Target Folder',
-        'save_report_as': 'Save Report As',
+        'save_dedup_report_as': 'Save Deduplicate Report As',
         'save_supp_report_as': 'Save Supplement Report As',
         'text_files': 'Text Files (*.txt)',
         'param_error': 'Parameter Error',
@@ -1469,7 +1730,7 @@ TRANSLATIONS = {
         'supp_vid_save': 'Space to supplement: {size:.2f} MB',
         'supp_vid_corrupt': 'Suspected corrupted videos: {count}',
         'elapsed': 'Elapsed: {sec:.1f} s',
-        'report_done': 'Report generated, loading automatically...',
+        'report_done': 'Report generated',
         'start_dedup': 'Generating deduplication report...',
         'dedup_done': 'Report generated: {path}',
         'start_supp': 'Generating supplement report...',

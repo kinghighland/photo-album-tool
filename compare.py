@@ -1,7 +1,7 @@
 import os
 import hashlib
 import logging
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 from multiprocessing import Pool, cpu_count
 import time
 import shutil
@@ -65,6 +65,12 @@ TEXTS = {
         'supp_vid_success': '成功增补 {count} 个视频到: {dir}',
         'supp_vid_exists': '已存在（未增补）{count} 个视频：',
         'en_dash': '：',
+        'scanning_images': '正在扫描图片文件...',
+        'images_found': '发现图片文件 {count} 张',
+        'scanning_videos': '正在扫描视频文件...',
+        'videos_found': '发现视频文件 {count} 个',
+        'analyzing_duplicates': '正在分析重复文件，共 {count} 组待处理...',
+        'analysis_complete': '分析完成',
     },
     'en': {
         'log_config': 'Log config',
@@ -112,6 +118,12 @@ TEXTS = {
         'supp_vid_success': 'Supplemented {count} videos to: {dir}',
         'supp_vid_exists': 'Already exists (not supplemented) {count} videos:',
         'en_dash': ':',
+        'scanning_images': 'Scanning image files...',
+        'images_found': 'Found {count} image files',
+        'scanning_videos': 'Scanning video files...',
+        'videos_found': 'Found {count} video files',
+        'analyzing_duplicates': 'Analyzing duplicates, {count} groups to process...',
+        'analysis_complete': 'Analysis complete',
     }
 }
 def get_text(lang, key, **kwargs):
@@ -150,7 +162,7 @@ def collect_images(folder, exts=None):
     返回：[{path, size, shape}...]
     """
     if exts is None:
-        exts = {'.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tiff'}
+        exts = {'.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tiff', '.avif'}
     image_files = []
     for root, _, files in os.walk(folder):
         for file in files:
@@ -202,6 +214,23 @@ def _hash_worker(args):
         logger.error(f"哈希计算失败: {path}, 错误: {e}")
         return path, None
 
+def is_valid_image(image_path):
+    """
+    改进的图片验证方法，使用load()代替verify()
+    """
+    try:
+        with Image.open(image_path) as img:
+            img.load()  # 使用load()代替verify()，不会破坏Image对象
+            # 检查图片基本属性
+            if img.size[0] <= 0 or img.size[1] <= 0:
+                return False
+            return True
+    except (IOError, OSError, UnidentifiedImageError):
+        return False
+    except Exception as e:
+        logger.warning(f"图片验证时发生未知错误: {image_path}, 错误: {e}")
+        return False
+    
 def find_duplicates(folder, report_path, hash_method='md5', dry_run=False, log_callback=None, progress_callback=None):
     """
     去重模式主流程：查找重复图片和视频并输出报告。
@@ -222,8 +251,10 @@ def find_duplicates(folder, report_path, hash_method='md5', dry_run=False, log_c
         log_emit(get_text(LANG, 'dry_run'))
     
     # 收集图片信息
+    log_emit(get_text(LANG, 'scanning_images'))
     image_meta = collect_images(folder)
-    total_images_scanned = len(image_meta)  # 添加这行
+    total_images_scanned = len(image_meta)
+    log_emit(get_text(LANG, 'images_found', count=total_images_scanned))
     progress_emit(0.1)
     
     # 按大小和尺寸分组
@@ -234,7 +265,9 @@ def find_duplicates(folder, report_path, hash_method='md5', dry_run=False, log_c
         key = (meta['size'], meta['shape'])
         group_map.setdefault(key, []).append(meta)
     
-    log_emit(get_text(LANG, 'group_count', count=len(group_map)))
+    groups_to_process = sum(1 for files in group_map.values() if len(files) >= 2)
+    if groups_to_process > 0:
+        log_emit(get_text(LANG, 'analyzing_duplicates', count=groups_to_process))
     progress_emit(0.2)
     
     # 计算哈希值并找出重复组
@@ -246,9 +279,6 @@ def find_duplicates(folder, report_path, hash_method='md5', dry_run=False, log_c
             processed_groups += 1
             continue
             
-        log_emit(get_text(LANG, 'group_processing', size=key[0], shape=key[1], count=len(files)))
-        
-        # 计算每个文件的哈希值和详细信息
         file_details = []
         for meta in files:
             try:
@@ -257,7 +287,6 @@ def find_duplicates(folder, report_path, hash_method='md5', dry_run=False, log_c
                     corrupt_files.append(meta['path'])
                     continue
                     
-                # 获取文件详细信息
                 file_info = {
                     'path': meta['path'],
                     'size': meta['size'],
@@ -267,18 +296,14 @@ def find_duplicates(folder, report_path, hash_method='md5', dry_run=False, log_c
                     'is_corrupt': False
                 }
                 
-                # 简化的图片验证
-                try:
-                    with Image.open(meta['path']) as img:
-                        img.load()
-                except Exception:
+                # 使用改进的图片验证方法
+                if not is_valid_image(meta['path']):
                     file_info['is_corrupt'] = True
                     corrupt_files.append(meta['path'])
                 
                 file_details.append(file_info)
                 
             except Exception as e:
-                log_emit(get_text(LANG, 'hash_fail', path=meta['path'], err=e))
                 corrupt_files.append(meta['path'])
         
         # 按哈希值分组
@@ -298,8 +323,10 @@ def find_duplicates(folder, report_path, hash_method='md5', dry_run=False, log_c
     progress_emit(0.7)
     
     # 处理视频文件
+    log_emit(get_text(LANG, 'scanning_videos'))
     video_meta = collect_videos(folder)
-    total_videos_scanned = len(video_meta)  # 添加这行
+    total_videos_scanned = len(video_meta)
+    log_emit(get_text(LANG, 'videos_found', count=total_videos_scanned))
     vid_groups = []
     
     if video_meta:
@@ -335,9 +362,9 @@ def find_duplicates(folder, report_path, hash_method='md5', dry_run=False, log_c
         'total_img_files': total_img_files,
         'total_vid_groups': len(vid_groups), 
         'total_vid_files': total_vid_files,
+        'total_images_scanned': total_images_scanned,
+        'total_videos_scanned': total_videos_scanned,
         'corrupt_files_count': len(corrupt_files),
-        'total_images_scanned': total_images_scanned,  # 添加这行
-        'total_videos_scanned': total_videos_scanned,  # 添加这行
         'potential_space_saved': sum(
             sum(file_info['size'] for file_info in group[1:]) 
             for group in img_groups
@@ -350,7 +377,7 @@ def find_duplicates(folder, report_path, hash_method='md5', dry_run=False, log_c
     # 写报告文件 (保持兼容性)
     _write_dedup_report(report_path, img_groups, vid_groups, stats)
     
-    log_emit(get_text(LANG, 'dedup_done', path=report_path))
+    log_emit(get_text(LANG, 'analysis_complete'))
     progress_emit(1.0)
     
     return {
@@ -361,7 +388,6 @@ def find_duplicates(folder, report_path, hash_method='md5', dry_run=False, log_c
         'progress': 1.0,
         'corrupt_files': corrupt_files
     }
-
 
 def supplement_images(main_folder, supplement_folder, report_path, hash_method='md5', dry_run=False, log_callback=None, progress_callback=None):
     """
@@ -540,7 +566,6 @@ def supplement_images(main_folder, supplement_folder, report_path, hash_method='
         'corrupt_files': corrupt_files
     }
 
-
 def _write_dedup_report(report_path, img_groups, vid_groups, stats):
     """写入去重报告文件"""
     with open(report_path, 'w', encoding='utf-8') as f:
@@ -573,7 +598,6 @@ def _write_dedup_report(report_path, img_groups, vid_groups, stats):
                 f.write("\n")
         else:
             f.write('未发现重复视频\n' if LANG == 'zh' else 'No duplicate videos found\n')
-
 
 def _write_supplement_report(report_path, added_images, skipped_images, added_videos, skipped_videos, target_dirs, stats, dry_run):
     """写入增补报告文件"""
