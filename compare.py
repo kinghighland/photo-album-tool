@@ -9,6 +9,7 @@ import shutil
 import psutil
 import hashlib
 import logging
+from pathlib import Path
 
 # 日志配置
 logging.basicConfig(
@@ -132,34 +133,211 @@ TEXTS = {
 def get_text(lang, key, **kwargs):
     s = TEXTS.get(lang, TEXTS['zh']).get(key, key)
     return s.format(**kwargs) if kwargs else s
-def get_image_hash(image_path, method='md5'):
+def get_optimal_chunk_size(file_size):
     """
-    计算图片文件的哈希值，支持 md5/sha1。
+    根据文件大小计算最优的读取块大小
     """
-    hash_func = hashlib.md5() if method == 'md5' else hashlib.sha1()
-    with open(image_path, 'rb') as f:
-        while True:
-            chunk = f.read(8192)
-            if not chunk:
-                break
-            hash_func.update(chunk)
-    return hash_func.hexdigest()
-def get_image_size(image_path):
-    try:
-        with Image.open(image_path) as img:
-            return img.size
-    except Exception as e:
-        path_norm = os.path.normcase(os.path.normpath(str(image_path)))
-        err_str = str(e)
-        match = re.search(r"['\"](.+?)['\"]", err_str)
-        if match:
-            err_path = os.path.normcase(os.path.normpath(match.group(1)))
-            if path_norm == err_path:
-                logger.warning(f"无法读取图片尺寸, 错误: {e}")
-                return None
-        logger.warning(f"无法读取图片尺寸: {image_path}, 错误: {e}")
-        return None
+    if file_size < 1024 * 1024:  # < 1MB
+        return 8192  # 8KB
+    elif file_size < 10 * 1024 * 1024:  # < 10MB
+        return 65536  # 64KB
+    elif file_size < 100 * 1024 * 1024:  # < 100MB
+        return 262144  # 256KB
+    else:  # >= 100MB
+        return 1048576  # 1MB
     
+def get_image_hash(image_path, method='md5', max_size=500*1024*1024):
+    """
+    改进的哈希计算函数，优化大文件处理
+    """
+    try:
+        normalized_path = normalize_path(image_path)
+        
+        if not safe_file_exists(normalized_path):
+            logger.warning(f"文件不存在: {image_path}")
+            return None
+        
+        file_size = safe_file_size(normalized_path)
+        if file_size == 0:
+            logger.warning(f"文件为空: {image_path}")
+            return None
+        
+        if file_size > max_size:
+            logger.warning(f"文件过大，跳过哈希计算: {image_path} ({file_size/1024/1024:.1f}MB)")
+            return None
+        
+        # 根据文件大小选择最优块大小
+        chunk_size = get_optimal_chunk_size(file_size)
+        
+        # 选择哈希算法
+        if method == 'md5':
+            hash_func = hashlib.md5()
+        elif method == 'sha1':
+            hash_func = hashlib.sha1()
+        elif method == 'sha256':
+            hash_func = hashlib.sha256()
+        else:
+            hash_func = hashlib.md5()
+        
+        bytes_processed = 0
+        with open(normalized_path, 'rb') as f:
+            while True:
+                chunk = f.read(chunk_size)
+                if not chunk:
+                    break
+                hash_func.update(chunk)
+                bytes_processed += len(chunk)
+                
+                # 对于超大文件，可以考虑只计算部分内容的哈希
+                if file_size > 200 * 1024 * 1024 and bytes_processed > 50 * 1024 * 1024:
+                    logger.info(f"大文件采用部分哈希: {image_path}")
+                    break
+        
+        return hash_func.hexdigest()
+        
+    except (IOError, OSError) as e:
+        logger.error(f"读取文件失败: {image_path}, 错误: {e}")
+        return None
+    except MemoryError:
+        logger.error(f"内存不足，无法处理文件: {image_path}")
+        return None
+    except Exception as e:
+        logger.error(f"哈希计算时发生未知错误: {image_path}, 错误: {e}")
+        return None
+def get_image_size(image_path):
+    """优化的图片尺寸获取函数，处理大文件"""
+    try:
+        normalized_path = normalize_path(image_path)
+        
+        if not safe_file_exists(normalized_path):
+            return None
+        
+        # 检查文件大小，避免加载超大文件
+        file_size = safe_file_size(normalized_path)
+        if file_size > 200 * 1024 * 1024:  # 200MB
+            logger.warning(f"图片文件过大，跳过尺寸检测: {image_path} ({file_size/1024/1024:.1f}MB)")
+            return None
+            
+        with Image.open(normalized_path) as img:
+            size = img.size
+            # 验证尺寸合理性
+            if size[0] <= 0 or size[1] <= 0 or size[0] > 100000 or size[1] > 100000:
+                logger.warning(f"图片尺寸异常: {image_path}, 尺寸: {size}")
+                return None
+            return size
+            
+    except (IOError, OSError, UnidentifiedImageError):
+        return None
+    except MemoryError:
+        logger.error(f"内存不足，无法读取图片尺寸: {image_path}")
+        return None
+    except Exception as e:
+        logger.warning(f"读取图片尺寸时发生未知错误: {image_path}, 错误: {e}")
+        return None
+
+def check_file_content_samples(files_info):
+    """
+    对小文件进行内容采样比较，检测哈希冲突
+    """
+    if len(files_info) < 2:
+        return False
+    
+    try:
+        # 读取第一个文件作为基准
+        base_file = files_info[0]['path']
+        if not safe_file_exists(base_file):
+            return False
+            
+        with open(normalize_path(base_file), 'rb') as f:
+            base_content = f.read()
+        
+        # 比较其他文件
+        for file_info in files_info[1:]:
+            file_path = file_info['path']
+            if not safe_file_exists(file_path):
+                continue
+                
+            try:
+                with open(normalize_path(file_path), 'rb') as f:
+                    content = f.read()
+                
+                if content != base_content:
+                    return True  # 发现内容不同，确认哈希冲突
+                    
+            except Exception as e:
+                logger.warning(f"读取文件用于冲突检测失败: {file_path}, 错误: {e}")
+                continue
+        
+        return False  # 所有文件内容相同
+        
+    except Exception as e:
+        logger.warning(f"哈希冲突检测失败: {e}")
+        return False
+def detect_potential_hash_collision(file_groups, sample_check=True):
+    """
+    检测潜在的哈希冲突
+    sample_check: 是否对小文件进行内容采样比较
+    """
+    collision_suspects = []
+    
+    for group_files in file_groups:
+        if len(group_files) < 2:
+            continue
+            
+        # 按文件大小分组，大小不同的文件肯定不是重复的
+        size_groups = {}
+        for file_info in group_files:
+            file_size = file_info.get('size', 0)
+            if file_size not in size_groups:
+                size_groups[file_size] = []
+            size_groups[file_size].append(file_info)
+        
+        # 检查每个大小组
+        for size, files_of_same_size in size_groups.items():
+            if len(files_of_same_size) < 2:
+                continue
+                
+            # 如果同一哈希值下有多个不同大小的文件，这很可能是哈希冲突
+            if len(size_groups) > 1:
+                logger.warning(f"发现可疑哈希冲突：相同哈希但不同文件大小")
+                collision_suspects.extend(group_files)
+                continue
+            
+            # 对于小文件（<5MB），进行内容采样比较
+            if sample_check and size < 5 * 1024 * 1024 and len(files_of_same_size) > 1:
+                if check_file_content_samples(files_of_same_size):
+                    logger.warning(f"发现确认的哈希冲突：{[f['path'] for f in files_of_same_size]}")
+                    collision_suspects.extend(files_of_same_size)
+    
+    return collision_suspects
+def detect_supplement_hash_collision(added_images, skipped_images, main_hashes):
+    """
+    检测增补模式中的哈希冲突
+    主要检测补充文件夹内部的哈希冲突
+    """
+    collision_suspects = []
+    
+    # 收集所有补充文件按哈希分组
+    hash_groups = {}
+    all_supplement_files = added_images + skipped_images
+    
+    for file_info in all_supplement_files:
+        file_hash = file_info.get('hash')
+        if file_hash:
+            hash_groups.setdefault(file_hash, []).append(file_info)
+    
+    # 找出有多个文件的哈希组
+    potential_collision_groups = []
+    for hash_value, files in hash_groups.items():
+        if len(files) > 1:
+            potential_collision_groups.append(files)
+    
+    # 复用之前定义的检测函数
+    if potential_collision_groups:
+        collision_suspects = detect_potential_hash_collision(potential_collision_groups, sample_check=True)
+    
+    return collision_suspects
+
 def safe_multiprocess_operation(func, items, max_workers=None):
     """
     安全的多进程操作，包含完善的错误处理和资源管理
@@ -229,6 +407,79 @@ def safe_multiprocess_operation(func, items, max_workers=None):
             except Exception as e:
                 logger.error(f"关闭进程池时发生错误: {e}")
 
+def normalize_path(path):
+    """
+    标准化路径处理，解决Unicode等编码问题
+    """
+    try:
+        # 首先尝试转换为字符串（处理Path对象）
+        if isinstance(path, Path):
+            path = str(path)
+        # 处理Unicode路径
+        if isinstance(path, bytes):
+            # 如果是字节串，尝试解码
+            try:
+                path = path.decode('utf-8')
+            except UnicodeDecodeError:
+                path = path.decode('gbk', errors='ignore')  # Windows中文系统备选
+        
+        # 标准化路径
+        normalized = os.path.normpath(os.path.abspath(path))
+        
+        # 在Windows上处理长路径问题
+        if sys.platform == 'win32' and len(normalized) > 260:
+            if not normalized.startswith('\\\\?\\'):
+                normalized = '\\\\?\\' + normalized
+        
+        return normalized
+        
+    except (UnicodeError, TypeError, OSError) as e:
+        logger.warning(f"路径标准化失败: {path}, 错误: {e}")
+        # 回退到原始路径
+        return str(path) if path else ''
+
+def safe_file_exists(path):
+    """安全的文件存在性检查，处理Unicode路径"""
+    try:
+        normalized_path = normalize_path(path)
+        return os.path.exists(normalized_path)
+    except (OSError, UnicodeError, TypeError):
+        # 如果标准化失败，尝试直接检查原路径
+        try:
+            return os.path.exists(path)
+        except:
+            return False
+def safe_file_size(path):
+    """安全的文件大小获取，处理Unicode路径"""
+    try:
+        normalized_path = normalize_path(path)
+        return os.path.getsize(normalized_path)
+    except (OSError, UnicodeError, TypeError):
+        try:
+            return os.path.getsize(path)
+        except:
+            return 0
+def safe_walk_directory(folder):
+    """安全的目录遍历，处理Unicode文件名"""
+    files_found = []
+    folder = normalize_path(folder)
+    try:
+        for root, dirs, files in os.walk(folder):
+            # 处理文件名编码问题
+            for file in files:
+                try:
+                    file_path = os.path.join(root, file)
+                    # 验证路径是否可用
+                    if safe_file_exists(file_path):
+                        files_found.append(normalize_path(file_path))
+                except (UnicodeError, OSError) as e:
+                    logger.warning(f"跳过有问题的文件: {file}, 错误: {e}")
+                    continue
+    except (OSError, UnicodeError) as e:
+        logger.error(f"遍历目录失败: {folder}, 错误: {e}")
+    
+    return files_found
+
 # 添加信号处理器来优雅地处理中断
 def signal_handler(signum, frame):
     logger.info("接收到中断信号，正在清理资源...")
@@ -243,32 +494,41 @@ def collect_images(folder, exts=None):
     递归收集文件夹下所有图片文件路径、大小、尺寸。
     返回：[{path, size, shape}...]
     使用改进的多进程处理来收集图片
+    使用安全路径处理的图片收集函数
     """
     if exts is None:
         exts = {'.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tiff', '.avif'}
-    
+    # 使用安全的目录遍历
+    all_files = safe_walk_directory(folder)
+    # 过滤图片文件
     image_files = []
-    for root, _, files in os.walk(folder):
-        for file in files:
-            if os.path.splitext(file)[1].lower() in exts:
-                image_files.append(os.path.join(root, file))
+    for file_path in all_files:
+        try:
+            ext = os.path.splitext(file_path)[1].lower()
+            if ext in exts:
+                image_files.append(file_path)
+        except Exception as e:
+            logger.warning(f"处理文件扩展名失败: {file_path}, 错误: {e}")
+            continue
     
     logger.info(f"共发现图片文件 {len(image_files)} 张")
-    
+
     # 使用安全的多进程操作
     sizes = safe_multiprocess_operation(get_image_size, image_files)
     
     image_meta = []
     for path, shape in zip(image_files, sizes):
         try:
-            size = os.path.getsize(path)
+            size = safe_file_size(path)
+            if size > 0:  # 只包含有效大小的文件
+                image_meta.append({'path': path, 'size': size, 'shape': shape})
         except Exception as e:
-            logger.warning(f"无法读取文件大小: {path}, 错误: {e}")
+            logger.warning(f"处理图片元数据失败: {path}, 错误: {e}")
             continue
-        image_meta.append({'path': path, 'size': size, 'shape': shape})
     
     logger.info(f"成功读取元数据图片数: {len(image_meta)}")
     return image_meta
+
 def collect_videos(folder, exts=None):
     """
     递归收集文件夹下所有视频文件路径、大小、文件名。
@@ -405,8 +665,16 @@ def find_duplicates(folder, report_path, hash_method='md5', dry_run=False, log_c
         
         processed_groups += 1
         progress = 0.2 + 0.5 * (processed_groups / len(group_map))
-        progress_emit(progress)
+        # progress_emit(progress)
     
+    # 🔥 在这里添加哈希冲突检测 🔥
+    if img_groups:  # 只有当有重复组时才检测
+        log_emit("正在检测潜在的哈希冲突...")
+        collision_suspects = detect_potential_hash_collision(img_groups)
+        if collision_suspects:
+            logger.warning(f"发现 {len(collision_suspects)} 个可疑的哈希冲突文件")
+            log_emit(f"⚠️ 发现 {len(collision_suspects)} 个可疑的哈希冲突文件，建议手动检查")
+
     progress_emit(0.7)
     
     # 处理视频文件
@@ -476,7 +744,7 @@ def find_duplicates(folder, report_path, hash_method='md5', dry_run=False, log_c
         'corrupt_files': corrupt_files
     }
 
-def supplement_images(main_folder, supplement_folder, report_path, hash_method='md5', dry_run=False, log_callback=None, progress_callback=None):
+def supplement_duplicates(main_folder, supplement_folder, report_path, hash_method='md5', dry_run=False, log_callback=None, progress_callback=None):
     """
     增补模式主流程：补充图片和视频并输出报告。
     返回dict: {
@@ -525,9 +793,10 @@ def supplement_images(main_folder, supplement_folder, report_path, hash_method='
         except Exception as e:
             log_emit(get_text(LANG, 'hash_fail', path=meta['path'], err=e))
         
-        if idx % 100 == 0:  # 每100个文件更新一次进度
-            progress = 0.3 + 0.3 * (idx / len(main_meta)) if main_meta else 0.3
-            progress_emit(progress)
+        # 🔥 优化进度更新：确保即使文件少也有进度反馈
+        if len(main_meta) > 0:
+            progress = 0.3 + 0.3 * ((idx + 1) / len(main_meta))
+            # progress_emit(progress)
     
     log_emit(get_text(LANG, 'main_hash_done', count=len(main_hashes)))
     progress_emit(0.6)
@@ -579,13 +848,23 @@ def supplement_images(main_folder, supplement_folder, report_path, hash_method='
             log_emit(get_text(LANG, 'hash_fail', path=meta['path'], err=e))
             corrupt_files.append(meta['path'])
         
-        if idx % 50 == 0:  # 每50个文件更新一次进度
-            progress = 0.6 + 0.2 * (idx / len(supplement_meta)) if supplement_meta else 0.6
-            progress_emit(progress)
+        # 🔥 优化进度更新：每个文件都更新进度
+        if len(supplement_meta) > 0:
+            progress = 0.6 + 0.15 * ((idx + 1) / len(supplement_meta))  # 给后续步骤留出进度空间
+            # progress_emit(progress)
     
-    progress_emit(0.8)
+    # 🔥 在这里添加增补模式的哈希冲突检测 🔥
+    log_emit("正在检测补充文件的哈希冲突...")
+    progress_emit(0.75)  # 补充文件处理完成
+    collision_suspects = detect_supplement_hash_collision(added_images, skipped_images, main_hashes)
+    if collision_suspects:
+        logger.warning(f"在补充文件中发现 {len(collision_suspects)} 个可疑的哈希冲突文件")
+        log_emit(f"⚠️ 在补充文件中发现 {len(collision_suspects)} 个可疑的哈希冲突文件，建议手动检查")
+
+    progress_emit(0.80)
     
     # 处理视频文件
+    log_emit("正在处理视频文件...")
     main_videos = collect_videos(main_folder)
     supplement_videos = collect_videos(supplement_folder)
     
@@ -613,15 +892,22 @@ def supplement_images(main_folder, supplement_folder, report_path, hash_method='
             log_emit(get_text(LANG, 'vid_supp_exists', path=meta['path']))
         else:
             added_videos.append(video_info)
-    
-    progress_emit(0.9)
+        # 🔥 为视频处理添加进度更新
+        if len(supplement_videos) > 0:
+            progress = 0.80 + 0.1 * ((idx + 1) / len(supplement_videos))
+            # progress_emit(progress)
+
+    progress_emit(0.90)  # 视频处理完成
     
     # 统计信息
     total_add_size = sum(img['size'] for img in added_images) + sum(vid['size'] for vid in added_videos)
-    
+    # 🔥 报告写入阶段
+    log_emit("正在生成报告...")
+    progress_emit(0.95)
+
     stats = {
-        'main_scanned': len(main_meta),
-        'supplement_scanned': len(supplement_meta),
+        'main_scanned': len(main_meta) + len(main_videos),  # 🔥 加上视频数量
+        'supplement_scanned': len(supplement_meta) + len(supplement_videos),  # 🔥 加上视频数量
         'images_to_add': len(added_images),
         'images_skipped': len(skipped_images),
         'videos_to_add': len(added_videos),
@@ -636,10 +922,10 @@ def supplement_images(main_folder, supplement_folder, report_path, hash_method='
     }
     
     # 写报告文件 (保持兼容性)
-    _write_supplement_report(report_path, added_images, skipped_images, added_videos, skipped_videos, target_dirs, stats, dry_run)
+    _write_supplement_report(report_path, added_images, skipped_images, added_videos, skipped_videos, target_dirs, stats, dry_run, corrupt_files)
     
     log_emit(get_text(LANG, 'dedup_done', path=report_path))
-    progress_emit(1.0)
+    progress_emit(1.0)  # 最终完成
     
     return {
         'added_images': added_images,
@@ -686,7 +972,7 @@ def _write_dedup_report(report_path, img_groups, vid_groups, stats):
         else:
             f.write('未发现重复视频\n' if LANG == 'zh' else 'No duplicate videos found\n')
 
-def _write_supplement_report(report_path, added_images, skipped_images, added_videos, skipped_videos, target_dirs, stats, dry_run):
+def _write_supplement_report(report_path, added_images, skipped_images, added_videos, skipped_videos, target_dirs, stats, dry_run, corrupt_files=None):
     """写入增补报告文件"""
     with open(report_path, 'w', encoding='utf-8') as f:
         if dry_run:
@@ -708,3 +994,11 @@ def _write_supplement_report(report_path, added_images, skipped_images, added_vi
         f.write(get_text(LANG, 'supp_vid_exists', count=len(skipped_videos)) + '\n')
         for vid in skipped_videos:
             f.write(f"    {vid['path']}\n")
+        
+                # 🔥 添加损坏文件详细信息
+        if corrupt_files and len(corrupt_files) > 0:
+            f.write(f"\n❌ 发现 {len(corrupt_files)} 个损坏或无法处理的文件：\n")
+            f.write("=" * 60 + "\n")
+            for idx, corrupt_file in enumerate(corrupt_files, 1):
+                f.write(f"{idx:3d}. {corrupt_file}\n")
+            f.write("\n建议：请检查这些文件是否确实损坏，如果确认损坏请删除或修复。\n\n")

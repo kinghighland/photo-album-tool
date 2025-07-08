@@ -35,7 +35,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)  # 新增logger定义
 
-from compare import find_duplicates, supplement_images #, collect_images, collect_videos 这两个函数包含多进程代码，在GUI环境中会导致pickle错误
+from compare import find_duplicates, supplement_duplicates #, collect_images, collect_videos 这两个函数包含多进程代码，在GUI环境中会导致pickle错误
 
 
 def check_ffmpeg_available():
@@ -196,7 +196,7 @@ class SupplementReportThread(QThread):
                 self.log_signal.emit(msg)
             def prog_cb(val):
                 self.progress = val
-            result = compare.supplement_images(self.main_folder, self.supplement_folder, self.report_path, self.hash_method, dry_run=self.dry_run, log_callback=log_cb, progress_callback=prog_cb)
+            result = compare.supplement_duplicates(self.main_folder, self.supplement_folder, self.report_path, self.hash_method, dry_run=self.dry_run, log_callback=log_cb, progress_callback=prog_cb)
             self.data_signal.emit(result)
             self.log_signal.emit(tr('supp_done', path=self.report_path))
             self.done_signal.emit(self.report_path)
@@ -1057,7 +1057,7 @@ class DedupGui(QWidget):
         self.folder_info_messages.append(folder_msg)
         self.log_box.append(folder_msg)
         
-        report_path, _ = QFileDialog.getSaveFileName(self, tr('save_report_as'), 'report.txt', tr('text_files'))
+        report_path, _ = QFileDialog.getSaveFileName(self, tr('save_dedup_report_as'), 'deduplicate_report.txt', tr('text_files'))
         if not report_path:
             return
         hash_method = 'md5'

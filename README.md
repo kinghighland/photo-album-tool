@@ -39,7 +39,7 @@ python main.py <待去重文件夹> --report <报告输出路径> [--hash md5|sh
 - 默认只预演（不做实际写入），加 `--execute` 才会真正操作文件。
 - 示例：
   ```bash
-  python main.py D:/photos --report report.txt --hash md5 --execute
+  python main.py D:/photos --report deduplicate_report.txt --hash md5 --execute
   ```
 
 ### 2. 增补模式

@@ -12,6 +12,7 @@ __pycache__/
 
 delete_list.txt
 report.txt
+deduplicate_report.txt
 supplement_report.txt
 
 # Distribution / packaging

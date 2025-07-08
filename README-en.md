@@ -39,7 +39,7 @@ python main.py <target_folder> --report <report_output_path> [--hash md5|sha1] [
 - By default, runs in dry-run mode (no actual file changes). Add `--execute` to perform real operations.
 - Example:
   ```bash
-  python main.py D:/photos --report report.txt --hash md5 --execute
+  python main.py D:/photos --report deduplicate_report.txt --hash md5 --execute
   ```
 
 ### 2. Supplement Mode

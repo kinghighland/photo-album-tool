@@ -3,7 +3,7 @@ import os
 from compare import (
     collect_images,
     find_duplicates,
-    supplement_images
+    supplement_duplicates
 )
 
 TEXTS = {
@@ -53,7 +53,7 @@ def main():
     dry_run = not args.execute
     if args.folder2:
         print(get_text(lang, 'supp_mode', main=args.folder1, supp=args.folder2))
-        compare.supplement_images(args.folder1, args.folder2, args.report, args.hash, dry_run=dry_run)
+        compare.supplement_duplicates(args.folder1, args.folder2, args.report, args.hash, dry_run=dry_run)
     else:
         print(get_text(lang, 'dedup_mode', folder=args.folder1))
         compare.find_duplicates(args.folder1, args.report, args.hash, dry_run=dry_run)
