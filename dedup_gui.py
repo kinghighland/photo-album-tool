@@ -128,13 +128,15 @@ class ReportThread(QThread):
     data_signal = pyqtSignal(object)
     error_signal = pyqtSignal(str)
 
-    def __init__(self, folder, report_path, hash_method, lang):
+    def __init__(self, folder, report_path, hash_method, lang, dry_run=True, progress_callback=None):
         super().__init__()
         self.folder = folder
         self.report_path = report_path
         self.hash_method = hash_method
+        self.dry_run = dry_run
         self.lang = lang
         self._is_cancelled = False
+        self.progress_callback = progress_callback  # 新增
 
     def run(self):
         try:
@@ -147,14 +149,14 @@ class ReportThread(QThread):
                     self.log_signal.emit(msg)
             
             def prog_cb(val):
-                if not self._is_cancelled:
-                    self.progress = val
-            
+                if not self._is_cancelled and self.progress_callback:
+                    self.progress_callback(val)  # 只调用，不 emit 信号
+
             result = compare.find_duplicates(
                 self.folder, 
                 self.report_path, 
                 self.hash_method, 
-                dry_run=False, 
+                dry_run=self.dry_run, 
                 log_callback=log_cb, 
                 progress_callback=prog_cb
             )
@@ -179,7 +181,8 @@ class SupplementReportThread(QThread):
     log_signal = pyqtSignal(str)
     done_signal = pyqtSignal(str)
     data_signal = pyqtSignal(object)
-    def __init__(self, main_folder, supplement_folder, report_path, hash_method, lang, dry_run=True):
+    error_signal = pyqtSignal(str)
+    def __init__(self, main_folder, supplement_folder, report_path, hash_method, lang, dry_run=True, progress_callback=None):
         super().__init__()
         self.main_folder = main_folder
         self.supplement_folder = supplement_folder
@@ -187,22 +190,45 @@ class SupplementReportThread(QThread):
         self.hash_method = hash_method
         self.dry_run = dry_run
         self.lang = lang
+        self.progress_callback = progress_callback  # 新增
+        self._is_cancelled = False  # ← 添加这行
+
     def run(self):
         try:
             import compare
             compare.LANG = self.lang
             self.log_signal.emit(tr('start_supp'))
             def log_cb(msg):
-                self.log_signal.emit(msg)
+                if not self._is_cancelled:
+                    self.log_signal.emit(msg)
             def prog_cb(val):
-                self.progress = val
-            result = compare.supplement_duplicates(self.main_folder, self.supplement_folder, self.report_path, self.hash_method, dry_run=self.dry_run, log_callback=log_cb, progress_callback=prog_cb)
-            self.data_signal.emit(result)
-            self.log_signal.emit(tr('supp_done', path=self.report_path))
-            self.done_signal.emit(self.report_path)
+                if not self._is_cancelled and self.progress_callback:
+                    self.progress_callback(val)  # 只调用，不 emit 信号
+                
+            result = compare.supplement_duplicates(
+                self.main_folder, 
+                self.supplement_folder, 
+                self.report_path, 
+                self.hash_method, 
+                dry_run=self.dry_run, 
+                log_callback=log_cb, 
+                progress_callback=prog_cb
+            )
+            if not self._is_cancelled:
+                self.data_signal.emit(result)
+                self.log_signal.emit(tr('supp_done', path=self.report_path))
+                self.done_signal.emit(self.report_path)
+        except KeyboardInterrupt:
+            self.log_signal.emit("Task canceled by user")
         except Exception as e:
             tb = traceback.format_exc()
-            self.log_signal.emit(tr('error', err=e, tb=tb))
+            error_msg = f"Task failed: {str(e)}"
+            self.log_signal.emit(error_msg)
+            self.error_signal.emit(f"{error_msg}\n\nDetailed Error:\n{tb}")
+    
+    def cancel(self):
+        self._is_cancelled = True
+
 class ClickableLabel(QLabel):
     def __init__(self, path, parent=None):
         super().__init__(parent)
@@ -233,6 +259,8 @@ class ClickableLabel(QLabel):
             dlg.exec_()
 
 class DedupGui(QWidget):
+    progress_update = pyqtSignal(int)
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle('照片去重报告处理工具')
@@ -289,10 +317,10 @@ class DedupGui(QWidget):
         
         # 顶部操作区
         btn_layout = QHBoxLayout()
-        self.btn_generate_report = QPushButton(tr('generate_report'))
-        self.btn_generate_report.clicked.connect(self.generate_report_dialog)
-        self.btn_generate_supp_report = QPushButton(tr('generate_supp_report'))
-        self.btn_generate_supp_report.clicked.connect(self.generate_supp_report_dialog)
+        self.btn_duplication_analysis = QPushButton(tr('duplication_analysis'))
+        self.btn_duplication_analysis.clicked.connect(self.btn_duplication_analysis_dialog)
+        self.btn_supplement_analysis = QPushButton(tr('supplement_analysis'))
+        self.btn_supplement_analysis.clicked.connect(self.supplement_analysis_dialog)
         self.btn_load = QPushButton(tr('load_report'))
         self.btn_load.clicked.connect(self.load_report)
         self.btn_delete = QPushButton(tr('delete'))
@@ -305,8 +333,8 @@ class DedupGui(QWidget):
         self.combo_strategy.addItems([tr('keep_first'), tr('keep_newest'), tr('keep_largest')])
         self.combo_strategy.currentIndexChanged.connect(self.apply_strategy)
         self.batch_select_label = QLabel(tr('batch_select'))
-        btn_layout.addWidget(self.btn_generate_report)
-        btn_layout.addWidget(self.btn_generate_supp_report)
+        btn_layout.addWidget(self.btn_duplication_analysis)
+        btn_layout.addWidget(self.btn_supplement_analysis)
         btn_layout.addWidget(self.btn_load)
         btn_layout.addWidget(self.btn_delete)
         btn_layout.addWidget(self.btn_select_all)
@@ -324,11 +352,13 @@ class DedupGui(QWidget):
         
         # 进度条
         self.progress = QProgressBar()
-        self.progress.setMinimum(0)
-        self.progress.setMaximum(0)
+        self.progress.setRange(0, 100)
+        #self.progress.setMinimum(0)
+        #self.progress.setMaximum(100)
         self.progress.hide()
         upper_layout.addWidget(self.progress)
-        
+        self.progress_update.connect(self.progress.setValue)
+
         # TabWidget
         self.tabs = QTabWidget()
         # 图片Tab
@@ -898,8 +928,8 @@ class DedupGui(QWidget):
             self.supplement_vid_list.addItem(list_item)
             self.supplement_vid_list.setItemWidget(list_item, item_widget)
         # 动态刷新统计标签
-        self.supp_img_label.setText(tr('supp_img', count=len(self.supplement_img_files)) + ' 张')
-        self.supp_vid_label.setText(tr('supp_vid', count=len(self.supplement_vid_files)) + ' 个')
+        self.supp_img_label.setText(tr('supp_img', count=len(self.supplement_img_files)))
+        self.supp_vid_label.setText(tr('supp_vid', count=len(self.supplement_vid_files)))
         # 更新统计区损坏图片数
         self.log_supplement_stats()
 
@@ -1031,8 +1061,8 @@ class DedupGui(QWidget):
         self.supplement_vid_list.clear()
         
         # 重置增补标签
-        self.supp_img_label.setText(tr('supp_img', count=0) + ' 张')
-        self.supp_vid_label.setText(tr('supp_vid', count=0) + ' 个')
+        self.supp_img_label.setText(tr('supp_img', count=0))
+        self.supp_vid_label.setText(tr('supp_vid', count=0))
         
         # 重置策略选择
         self.combo_strategy.setCurrentIndex(0)
@@ -1040,7 +1070,7 @@ class DedupGui(QWidget):
         # 切换到第一个页签
         self.tabs.setCurrentIndex(0)
 
-    def generate_report_dialog(self):
+    def btn_duplication_analysis_dialog(self):
         folder = QFileDialog.getExistingDirectory(self, tr('select_target_folder'))
         if not folder:
             return
@@ -1063,7 +1093,11 @@ class DedupGui(QWidget):
         hash_method = 'md5'
         self.progress.show()
         self._last_report_start_time = time.time()
-        self.thread = ReportThread(folder, report_path, hash_method, LANG)
+        self.thread = ReportThread(
+            folder, report_path, hash_method, LANG,
+            dry_run=True,
+            progress_callback=lambda val: self.progress_update.emit(int(val * 100))  # ← 修改这行
+        )
         self.thread.data_signal.connect(self.on_dedup_data)
         self.thread.done_signal.connect(self.on_report_done)
         self.thread.error_signal.connect(self.on_thread_error)  
@@ -1075,7 +1109,7 @@ class DedupGui(QWidget):
         QMessageBox.critical(self, "Execuation Error", error_msg)
         self.log_box.append("❌ Execuation Failed")
         
-    def generate_supp_report_dialog(self):
+    def supplement_analysis_dialog(self):
         main_folder = QFileDialog.getExistingDirectory(self, tr('select_main_folder'))
         if not main_folder:
             return
@@ -1110,9 +1144,14 @@ class DedupGui(QWidget):
         hash_method = 'md5'
         self.progress.show()
         self._last_report_start_time = time.time()
-        self.supp_thread = SupplementReportThread(main_folder, supplement_folder, report_path, hash_method, LANG, dry_run=True)
+        self.supp_thread = SupplementReportThread(
+            main_folder, supplement_folder, report_path, hash_method, LANG, 
+            dry_run=True,
+            progress_callback=lambda val: self.progress_update.emit(int(val * 100))  # ← 添加这行
+        )
         self.supp_thread.data_signal.connect(self.on_supp_data)
         self.supp_thread.done_signal.connect(self.on_report_done)
+        self.supp_thread.error_signal.connect(self.on_thread_error)  # ← 添加错误处理
         self.supp_thread.start()
 
     def on_report_done(self, report_path):
@@ -1406,8 +1445,8 @@ class DedupGui(QWidget):
             self.supplement_vid_list.setItemWidget(list_item, item_widget)
         
         # 更新标签
-        self.supp_img_label.setText(tr('supp_img', count=len(self.supplement_img_files)) + ' 张')
-        self.supp_vid_label.setText(tr('supp_vid', count=len(self.supplement_vid_files)) + ' 个')
+        self.supp_img_label.setText(tr('supp_img', count=len(self.supplement_img_files)))
+        self.supp_vid_label.setText(tr('supp_vid', count=len(self.supplement_vid_files)))
     
     def _update_supplement_stats(self, stats):
         """更新增补统计信息"""
@@ -1523,8 +1562,8 @@ class DedupGui(QWidget):
                 msg += f"\n  {tr('main_scanned', count=self._last_supp_main_count)}"
             if self._last_supp_supp_count is not None:
                 msg += f"\n  {tr('supp_scanned', count=self._last_supp_supp_count)}"
-            msg += f"\n  {tr('supp_img', count=img_count)} 张, {tr('supp_img_save', size=img_size/1024/1024)}, {tr('supp_img_corrupt', count=self._last_supp_corrupt_img)}"
-            msg += f"\n  {tr('supp_vid', count=vid_count)} 个, {tr('supp_vid_save', size=vid_size/1024/1024)}, {tr('supp_vid_corrupt', count=self._last_supp_corrupt_vid)}"
+            msg += f"\n  {tr('supp_img', count=img_count)}, {tr('supp_img_save', size=img_size/1024/1024)}, {tr('supp_img_corrupt', count=self._last_supp_corrupt_img)}"
+            msg += f"\n  {tr('supp_vid', count=vid_count)}, {tr('supp_vid_save', size=vid_size/1024/1024)}, {tr('supp_vid_corrupt', count=self._last_supp_corrupt_vid)}"
             if elapsed:
                 msg += f"\n  {tr('elapsed', sec=elapsed)}"
             self.log_box.append(msg)
@@ -1553,8 +1592,8 @@ class DedupGui(QWidget):
             msg += f"\n  {tr('main_scanned', count=self._last_supp_main_count)}"
         if self._last_supp_supp_count is not None:
             msg += f"\n  {tr('supp_scanned', count=self._last_supp_supp_count)}"
-        msg += f"\n  {tr('supp_img', count=img_count)} 张, {tr('supp_img_save', size=img_size/1024/1024)}, {tr('supp_img_corrupt', count=self._last_supp_corrupt_img)}"
-        msg += f"\n  {tr('supp_vid', count=vid_count)} 个, {tr('supp_vid_save', size=vid_size/1024/1024)}, {tr('supp_vid_corrupt', count=self._last_supp_corrupt_vid)}"
+        msg += f"\n  {tr('supp_img', count=img_count)}, {tr('supp_img_save', size=img_size/1024/1024)}, {tr('supp_img_corrupt', count=self._last_supp_corrupt_img)}"
+        msg += f"\n  {tr('supp_vid', count=vid_count)}, {tr('supp_vid_save', size=vid_size/1024/1024)}, {tr('supp_vid_corrupt', count=self._last_supp_corrupt_vid)}"
         if elapsed:
             msg += f"\n  {tr('elapsed', sec=elapsed)}"
         self.log_box.append(msg)
@@ -1568,8 +1607,8 @@ class DedupGui(QWidget):
 
     def retranslate_ui(self):
         self.setWindowTitle(tr('title'))
-        self.btn_generate_report.setText(tr('generate_report'))
-        self.btn_generate_supp_report.setText(tr('generate_supp_report'))
+        self.btn_duplication_analysis.setText(tr('duplication_analysis'))
+        self.btn_supplement_analysis.setText(tr('supplement_analysis'))
         self.btn_load.setText(tr('load_report'))
         self.btn_delete.setText(tr('delete'))
         self.btn_select_all.setText(tr('select_all'))
@@ -1590,8 +1629,8 @@ class DedupGui(QWidget):
         self.btn_move_img_supp.setText(tr('move_supp_img'))
         self.btn_move_vid_supp.setText(tr('move_supp_vid'))
         # 重新设置增补tab标签
-        self.supp_img_label.setText(tr('supp_img', count=len(self.supplement_img_files)) + ' 张')
-        self.supp_vid_label.setText(tr('supp_vid', count=len(self.supplement_vid_files)) + ' 个')
+        self.supp_img_label.setText(tr('supp_img', count=len(self.supplement_img_files)))
+        self.supp_vid_label.setText(tr('supp_vid', count=len(self.supplement_vid_files)))
         # 语言切换标签
         self.combo_lang.setItemText(0, '中文')
         self.combo_lang.setItemText(1, 'English')
@@ -1608,8 +1647,8 @@ LANG = 'zh'
 TRANSLATIONS = {
     'zh': {
         'title': '照片去重报告处理工具',
-        'generate_report': '生成去重报告',
-        'generate_supp_report': '生成增补报告',
+        'duplication_analysis': '去重检查',
+        'supplement_analysis': '增补检查',
         'load_report': '加载报告',
         'delete': '直接删除',
         'select_all': '所有组全选',
@@ -1621,8 +1660,6 @@ TRANSLATIONS = {
         'img_tab': '图片重复组',
         'vid_tab': '视频重复组',
         'supp_tab': '增补结果',
-        'supp_img': '成功增补的图片：',
-        'supp_vid': '成功增补的视频：',
         'move_supp_img': '批量移动增补图片到指定目录',
         'move_supp_vid': '批量移动增补视频到指定目录',
         'select_main_folder': '选择主文件夹',
@@ -1665,10 +1702,10 @@ TRANSLATIONS = {
         'vid_del': '预计可删除: {count} 个',
         'vid_save': '预计节省空间: {size:.2f} MB',
         'vid_corrupt': '疑似损坏视频: {count} 个',
-        'supp_img': '需增补图片: {count}',
+        'supp_img': '需增补图片: {count} 张',
         'supp_img_save': '预计增补空间: {size:.2f} MB',
         'supp_img_corrupt': '疑似损坏图片: {count}',
-        'supp_vid': '需增补视频: {count}',
+        'supp_vid': '需增补视频: {count} 个',
         'supp_vid_save': '预计增补空间: {size:.2f} MB',
         'supp_vid_corrupt': '疑似损坏视频: {count}',
         'elapsed': '分析/报告生成耗时: {sec:.1f} 秒',
@@ -1703,8 +1740,8 @@ TRANSLATIONS = {
     },
     'en': {
         'title': 'Photo Deduplication & Supplement Tool',
-        'generate_report': 'Generate Deduplication Report',
-        'generate_supp_report': 'Generate Supplement Report',
+        'duplication_analysis': 'Duplication Analysis',
+        'supplement_analysis': 'Supplement Analysis',
         'load_report': 'Load Report',
         'delete': 'Delete Directly',
         'select_all': 'Select All Groups',
@@ -1716,8 +1753,6 @@ TRANSLATIONS = {
         'img_tab': 'Image Groups',
         'vid_tab': 'Video Groups',
         'supp_tab': 'Supplement Result',
-        'supp_img': 'Supplemented Images:',
-        'supp_vid': 'Supplemented Videos:',
         'move_supp_img': 'Batch Move Supplemented Images',
         'move_supp_vid': 'Batch Move Supplemented Videos',
         'select_main_folder': 'Select Main Folder',

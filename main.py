@@ -1,10 +1,6 @@
 import argparse
 import os
-from compare import (
-    collect_images,
-    find_duplicates,
-    supplement_duplicates
-)
+from compare import (collect_images,find_duplicates,supplement_duplicates)
 
 TEXTS = {
     'zh': {
