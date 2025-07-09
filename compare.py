@@ -1,3 +1,4 @@
+from translations import tr, get_language
 from PIL import Image, UnidentifiedImageError
 from multiprocessing import Pool, cpu_count
 import signal
@@ -21,118 +22,118 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
-LANG = 'zh'
-TEXTS = {
-    'zh': {
-        'log_config': '日志配置',
-        'hash_desc': '计算图片文件的哈希值，支持 md5/sha1。',
-        'img_collect': '递归收集文件夹下所有图片文件路径、大小、尺寸。',
-        'img_collect_ret': '返回：[{path, size, shape}...]',
-        'img_found': '共发现图片文件 {count} 张',
-        'img_meta': '成功读取元数据图片数: {count}',
-        'img_size_fail': '无法读取图片尺寸, 错误: {err}',
-        'img_size_fail2': '无法读取图片尺寸: {path}, 错误: {err}',
-        'file_size_fail': '无法读取文件大小: {path}, 错误: {err}',
-        'vid_collect': '递归收集文件夹下所有视频文件路径、大小、文件名。',
-        'vid_collect_ret': '返回：[{path, size, name}...]',
-        'vid_found': '共发现视频文件 {count} 个',
-        'vid_meta': '成功读取元数据视频数: {count}',
-        'vid_info_fail': '无法读取视频文件信息: {path}, 错误: {err}',
-        'hash_fail': '哈希计算失败: {path}, 错误: {err}',
-        'dedup_desc': '去重模式主流程：查找重复图片和视频并输出报告。',
-        'dry_run': '[DRY-RUN] 当前为只读模式，不会对任何文件做写入操作。',
-        'group_count': '分组后需进一步比对的组数: {count}',
-        'group_processing': '正在处理分组: 大小={size}, 尺寸={shape}, 文件数={count}',
-        'dedup_done': '去重完成，报告已保存到: {path}',
-        'supp_desc': '增补模式主流程：补充图片和视频并输出报告。',
-        'main_img_count': '主文件夹图片数: {main}, 补充文件夹图片数: {supp}',
-        'main_hash_done': '主文件夹哈希集合构建完成，唯一图片数: {count}',
-        'supp_dir': '补充图片_{timestamp}',
-        'supp_hash_fail': '补充图片哈希失败，跳过: {path',
-        'supp_exists': '已存在，未增补: {path}',
-        'disk_space': '增补图片总大小: {size:.2f} MB, 目标磁盘剩余空间: {free:.2f} MB',
-        'disk_full': '磁盘空间不足，操作中止！',
-        'disk_full_exc': '磁盘空间不足，无法完成增补操作！',
-        'dry_run_supp': '[DRY-RUN] 预演增补: {src} -> {dst}',
-        'supp_copy': '增补图片: {src} -> {dst}',
-        'supp_copy_fail': '复制图片失败: {src} -> {dst}, 错误: {err}',
-        'vid_supp_exists': '已存在视频，未增补: {path}',
-        'dry_run_vid': '[DRY-RUN] 预演增补视频: {src} -> {dst}',
-        'vid_supp_copy': '增补视频: {src} -> {dst}',
-        'vid_supp_copy_fail': '复制视频失败: {src} -> {dst}, 错误: {err}',
-        'dedup_img_group': '重复图片组{group_id} (哈希: {h}):',
-        'dedup_vid_header': '\n重复视频文件：\n',
-        'dedup_vid_group': '视频重复组{idx}:',
-        'supp_report': '增补图片报告',
-        'supp_img_success': '成功增补 {count} 张图片到: {dir}',
-        'supp_img_exists': '已存在（未增补）{count} 张图片：',
-        'supp_vid_success': '成功增补 {count} 个视频到: {dir}',
-        'supp_vid_exists': '已存在（未增补）{count} 个视频：',
-        'en_dash': '：',
-        'scanning_images': '正在扫描图片文件...',
-        'images_found': '发现图片文件 {count} 张',
-        'scanning_videos': '正在扫描视频文件...',
-        'videos_found': '发现视频文件 {count} 个',
-        'analyzing_duplicates': '正在分析重复文件，共 {count} 组待处理...',
-        'analysis_complete': '分析完成',
-    },
-    'en': {
-        'log_config': 'Log config',
-        'hash_desc': 'Calculate image file hash, supports md5/sha1.',
-        'img_collect': 'Recursively collect all image file paths, sizes, and shapes in folder.',
-        'img_collect_ret': 'Return: [{path, size, shape}...]',
-        'img_found': 'Found {count} image files',
-        'img_meta': 'Successfully read metadata for {count} images',
-        'img_size_fail': 'Failed to read image size, error: {err}',
-        'img_size_fail2': 'Failed to read image size: {path}, error: {err}',
-        'file_size_fail': 'Failed to read file size: {path}, error: {err}',
-        'vid_collect': 'Recursively collect all video file paths, sizes, and names in folder.',
-        'vid_collect_ret': 'Return: [{path, size, name}...]',
-        'vid_found': 'Found {count} video files',
-        'vid_meta': 'Successfully read metadata for {count} videos',
-        'vid_info_fail': 'Failed to read video file info: {path}, error: {err}',
-        'hash_fail': 'Hash calculation failed: {path}, error: {err}',
-        'dedup_desc': 'Deduplication main flow: find duplicate images/videos and output report.',
-        'dry_run': '[DRY-RUN] Readonly mode, no actual file operation.',
-        'group_count': 'Groups to further compare: {count}',
-        'group_processing': 'Processing group: size={size}, shape={shape}, count={count}',
-        'dedup_done': 'Deduplication done, report saved to: {path}',
-        'supp_desc': 'Supplement main flow: supplement images/videos and output report.',
-        'main_img_count': 'Main folder images: {main}, supplement folder images: {supp}',
-        'main_hash_done': 'Main folder hash set built, unique images: {count}',
-        'supp_dir': 'supplement_{timestamp}',
-        'supp_hash_fail': 'Supplement image hash failed, skip: {path}',
-        'supp_exists': 'Already exists, not supplemented: {path}',
-        'disk_space': 'Supplement images total size: {size:.2f} MB, target disk free: {free:.2f} MB',
-        'disk_full': 'Disk space not enough, abort!',
-        'disk_full_exc': 'Disk space not enough, cannot complete supplement!',
-        'dry_run_supp': '[DRY-RUN] Simulate supplement: {src} -> {dst}',
-        'supp_copy': 'Supplement image: {src} -> {dst}',
-        'supp_copy_fail': 'Copy image failed: {src} -> {dst}, error: {err}',
-        'vid_supp_exists': 'Video already exists, not supplemented: {path}',
-        'dry_run_vid': '[DRY-RUN] Simulate supplement video: {src} -> {dst}',
-        'vid_supp_copy': 'Supplement video: {src} -> {dst}',
-        'vid_supp_copy_fail': 'Copy video failed: {src} -> {dst}, error: {err}',
-        'dedup_img_group': 'Duplicate Image Group {group_id} (hash: {h}):',
-        'dedup_vid_header': '\nDuplicate Videos:\n',
-        'dedup_vid_group': 'Duplicate Video Group {idx}:',
-        'supp_report': 'Supplement Report',
-        'supp_img_success': 'Supplemented {count} images to: {dir}',
-        'supp_img_exists': 'Already exists (not supplemented) {count} images:',
-        'supp_vid_success': 'Supplemented {count} videos to: {dir}',
-        'supp_vid_exists': 'Already exists (not supplemented) {count} videos:',
-        'en_dash': ':',
-        'scanning_images': 'Scanning image files...',
-        'images_found': 'Found {count} image files',
-        'scanning_videos': 'Scanning video files...',
-        'videos_found': 'Found {count} video files',
-        'analyzing_duplicates': 'Analyzing duplicates, {count} groups to process...',
-        'analysis_complete': 'Analysis complete',
-    }
-}
-def get_text(lang, key, **kwargs):
-    s = TEXTS.get(lang, TEXTS['zh']).get(key, key)
-    return s.format(**kwargs) if kwargs else s
+# LANG = 'zh'
+# TEXTS = {
+#     'zh': {
+#         'log_config': '日志配置',
+#         'hash_desc': '计算图片文件的哈希值，支持 md5/sha1。',
+#         'img_collect': '递归收集文件夹下所有图片文件路径、大小、尺寸。',
+#         'img_collect_ret': '返回：[{path, size, shape}...]',
+#         'img_found': '共发现图片文件 {count} 张',
+#         'img_meta': '成功读取元数据图片数: {count}',
+#         'img_size_fail': '无法读取图片尺寸, 错误: {err}',
+#         'img_size_fail2': '无法读取图片尺寸: {path}, 错误: {err}',
+#         'file_size_fail': '无法读取文件大小: {path}, 错误: {err}',
+#         'vid_collect': '递归收集文件夹下所有视频文件路径、大小、文件名。',
+#         'vid_collect_ret': '返回：[{path, size, name}...]',
+#         'vid_found': '共发现视频文件 {count} 个',
+#         'vid_meta': '成功读取元数据视频数: {count}',
+#         'vid_info_fail': '无法读取视频文件信息: {path}, 错误: {err}',
+#         'hash_fail': '哈希计算失败: {path}, 错误: {err}',
+#         'dedup_desc': '去重模式主流程：查找重复图片和视频并输出报告。',
+#         'dry_run': '[DRY-RUN] 当前为只读模式，不会对任何文件做写入操作。',
+#         'group_count': '分组后需进一步比对的组数: {count}',
+#         'group_processing': '正在处理分组: 大小={size}, 尺寸={shape}, 文件数={count}',
+#         'dedup_done': '去重完成，报告已保存到: {path}',
+#         'supp_desc': '增补模式主流程：补充图片和视频并输出报告。',
+#         'main_img_count': '主文件夹图片数: {main}, 补充文件夹图片数: {supp}',
+#         'main_hash_done': '主文件夹哈希集合构建完成，唯一图片数: {count}',
+#         'supp_dir': '补充图片_{timestamp}',
+#         'supp_hash_fail': '补充图片哈希失败，跳过: {path',
+#         'supp_exists': '已存在，未增补: {path}',
+#         'disk_space': '增补图片总大小: {size:.2f} MB, 目标磁盘剩余空间: {free:.2f} MB',
+#         'disk_full': '磁盘空间不足，操作中止！',
+#         'disk_full_exc': '磁盘空间不足，无法完成增补操作！',
+#         'dry_run_supp': '[DRY-RUN] 预演增补: {src} -> {dst}',
+#         'supp_copy': '增补图片: {src} -> {dst}',
+#         'supp_copy_fail': '复制图片失败: {src} -> {dst}, 错误: {err}',
+#         'vid_supp_exists': '已存在视频，未增补: {path}',
+#         'dry_run_vid': '[DRY-RUN] 预演增补视频: {src} -> {dst}',
+#         'vid_supp_copy': '增补视频: {src} -> {dst}',
+#         'vid_supp_copy_fail': '复制视频失败: {src} -> {dst}, 错误: {err}',
+#         'dedup_img_group': '重复图片组{group_id} (哈希: {h}):',
+#         'dedup_vid_header': '\n重复视频文件：\n',
+#         'dedup_vid_group': '视频重复组{idx}:',
+#         'supp_report': '增补图片报告',
+#         'supp_img_success': '成功增补 {count} 张图片到: {dir}',
+#         'supp_img_exists': '已存在（未增补）{count} 张图片：',
+#         'supp_vid_success': '成功增补 {count} 个视频到: {dir}',
+#         'supp_vid_exists': '已存在（未增补）{count} 个视频：',
+#         'en_dash': '：',
+#         'scanning_images': '正在扫描图片文件...',
+#         'images_found': '发现图片文件 {count} 张',
+#         'scanning_videos': '正在扫描视频文件...',
+#         'videos_found': '发现视频文件 {count} 个',
+#         'analyzing_duplicates': '正在分析重复文件，共 {count} 组待处理...',
+#         'analysis_complete': '分析完成',
+#     },
+#     'en': {
+#         'log_config': 'Log config',
+#         'hash_desc': 'Calculate image file hash, supports md5/sha1.',
+#         'img_collect': 'Recursively collect all image file paths, sizes, and shapes in folder.',
+#         'img_collect_ret': 'Return: [{path, size, shape}...]',
+#         'img_found': 'Found {count} image files',
+#         'img_meta': 'Successfully read metadata for {count} images',
+#         'img_size_fail': 'Failed to read image size, error: {err}',
+#         'img_size_fail2': 'Failed to read image size: {path}, error: {err}',
+#         'file_size_fail': 'Failed to read file size: {path}, error: {err}',
+#         'vid_collect': 'Recursively collect all video file paths, sizes, and names in folder.',
+#         'vid_collect_ret': 'Return: [{path, size, name}...]',
+#         'vid_found': 'Found {count} video files',
+#         'vid_meta': 'Successfully read metadata for {count} videos',
+#         'vid_info_fail': 'Failed to read video file info: {path}, error: {err}',
+#         'hash_fail': 'Hash calculation failed: {path}, error: {err}',
+#         'dedup_desc': 'Deduplication main flow: find duplicate images/videos and output report.',
+#         'dry_run': '[DRY-RUN] Readonly mode, no actual file operation.',
+#         'group_count': 'Groups to further compare: {count}',
+#         'group_processing': 'Processing group: size={size}, shape={shape}, count={count}',
+#         'dedup_done': 'Deduplication done, report saved to: {path}',
+#         'supp_desc': 'Supplement main flow: supplement images/videos and output report.',
+#         'main_img_count': 'Main folder images: {main}, supplement folder images: {supp}',
+#         'main_hash_done': 'Main folder hash set built, unique images: {count}',
+#         'supp_dir': 'supplement_{timestamp}',
+#         'supp_hash_fail': 'Supplement image hash failed, skip: {path}',
+#         'supp_exists': 'Already exists, not supplemented: {path}',
+#         'disk_space': 'Supplement images total size: {size:.2f} MB, target disk free: {free:.2f} MB',
+#         'disk_full': 'Disk space not enough, abort!',
+#         'disk_full_exc': 'Disk space not enough, cannot complete supplement!',
+#         'dry_run_supp': '[DRY-RUN] Simulate supplement: {src} -> {dst}',
+#         'supp_copy': 'Supplement image: {src} -> {dst}',
+#         'supp_copy_fail': 'Copy image failed: {src} -> {dst}, error: {err}',
+#         'vid_supp_exists': 'Video already exists, not supplemented: {path}',
+#         'dry_run_vid': '[DRY-RUN] Simulate supplement video: {src} -> {dst}',
+#         'vid_supp_copy': 'Supplement video: {src} -> {dst}',
+#         'vid_supp_copy_fail': 'Copy video failed: {src} -> {dst}, error: {err}',
+#         'dedup_img_group': 'Duplicate Image Group {group_id} (hash: {h}):',
+#         'dedup_vid_header': '\nDuplicate Videos:\n',
+#         'dedup_vid_group': 'Duplicate Video Group {idx}:',
+#         'supp_report': 'Supplement Report',
+#         'supp_img_success': 'Supplemented {count} images to: {dir}',
+#         'supp_img_exists': 'Already exists (not supplemented) {count} images:',
+#         'supp_vid_success': 'Supplemented {count} videos to: {dir}',
+#         'supp_vid_exists': 'Already exists (not supplemented) {count} videos:',
+#         'en_dash': ':',
+#         'scanning_images': 'Scanning image files...',
+#         'images_found': 'Found {count} image files',
+#         'scanning_videos': 'Scanning video files...',
+#         'videos_found': 'Found {count} video files',
+#         'analyzing_duplicates': 'Analyzing duplicates, {count} groups to process...',
+#         'analysis_complete': 'Analysis complete',
+#     }
+# }
+# def get_text(lang, key, **kwargs):
+#     s = TEXTS.get(lang, TEXTS['zh']).get(key, key)
+#     return s.format(**kwargs) if kwargs else s
 def get_optimal_chunk_size(file_size):
     """
     根据文件大小计算最优的读取块大小
@@ -595,13 +596,13 @@ def find_duplicates(folder, report_path, hash_method='md5', dry_run=False, log_c
             progress_callback(value)
     
     if dry_run:
-        log_emit(get_text(LANG, 'dry_run'))
+        log_emit(tr('dry_run'))
     
     # 收集图片信息
-    log_emit(get_text(LANG, 'scanning_images'))
+    log_emit(tr('scanning_images'))
     image_meta = collect_images(folder)
     total_images_scanned = len(image_meta)
-    log_emit(get_text(LANG, 'images_found', count=total_images_scanned))
+    log_emit(tr('images_found', count=total_images_scanned))
     progress_emit(0.1)
     
     # 按大小和尺寸分组
@@ -614,7 +615,7 @@ def find_duplicates(folder, report_path, hash_method='md5', dry_run=False, log_c
     
     groups_to_process = sum(1 for files in group_map.values() if len(files) >= 2)
     if groups_to_process > 0:
-        log_emit(get_text(LANG, 'analyzing_duplicates', count=groups_to_process))
+        log_emit(tr('analyzing_duplicates', count=groups_to_process))
     progress_emit(0.2)
     
     # 计算哈希值并找出重复组
@@ -678,10 +679,10 @@ def find_duplicates(folder, report_path, hash_method='md5', dry_run=False, log_c
     progress_emit(0.7)
     
     # 处理视频文件
-    log_emit(get_text(LANG, 'scanning_videos'))
+    log_emit(tr('scanning_videos'))
     video_meta = collect_videos(folder)
     total_videos_scanned = len(video_meta)
-    log_emit(get_text(LANG, 'videos_found', count=total_videos_scanned))
+    log_emit(tr('videos_found', count=total_videos_scanned))
     vid_groups = []
     
     if video_meta:
@@ -732,7 +733,7 @@ def find_duplicates(folder, report_path, hash_method='md5', dry_run=False, log_c
     # 写报告文件 (保持兼容性)
     _write_dedup_report(report_path, img_groups, vid_groups, stats)
     
-    log_emit(get_text(LANG, 'analysis_complete'))
+    log_emit(tr('analysis_complete'))
     progress_emit(1.0)
     
     return {
@@ -771,7 +772,7 @@ def supplement_duplicates(main_folder, supplement_folder, report_path, hash_meth
             progress_callback(value)
     
     if dry_run:
-        log_emit(get_text(LANG, 'dry_run'))
+        log_emit(tr('dry_run'))
     
     # 扫描主文件夹
     main_meta = collect_images(main_folder)
@@ -781,7 +782,7 @@ def supplement_duplicates(main_folder, supplement_folder, report_path, hash_meth
     supplement_meta = collect_images(supplement_folder)
     progress_emit(0.3)
     
-    log_emit(get_text(LANG, 'main_img_count', main=len(main_meta), supp=len(supplement_meta)))
+    log_emit(tr('main_img_count', main=len(main_meta), supp=len(supplement_meta)))
     
     # 构建主文件夹哈希集合
     main_hashes = set()
@@ -791,14 +792,14 @@ def supplement_duplicates(main_folder, supplement_folder, report_path, hash_meth
             if file_hash:
                 main_hashes.add(file_hash)
         except Exception as e:
-            log_emit(get_text(LANG, 'hash_fail', path=meta['path'], err=e))
+            log_emit(tr('hash_fail', path=meta['path'], err=e))
         
         # 🔥 优化进度更新：确保即使文件少也有进度反馈
         if len(main_meta) > 0:
             progress = 0.3 + 0.3 * ((idx + 1) / len(main_meta))
-            # progress_emit(progress)
+            progress_emit(progress)
     
-    log_emit(get_text(LANG, 'main_hash_done', count=len(main_hashes)))
+    log_emit(tr('main_hash_done', count=len(main_hashes)))
     progress_emit(0.6)
     
     # 处理补充文件夹的图片
@@ -806,13 +807,13 @@ def supplement_duplicates(main_folder, supplement_folder, report_path, hash_meth
     skipped_images = []
     
     timestamp = time.strftime('%Y%m%d_%H%M%S')
-    supplement_dir = os.path.join(main_folder, get_text(LANG, 'supp_dir', timestamp=timestamp))
+    supplement_dir = os.path.join(main_folder, tr('supp_dir', timestamp=timestamp))
     
     for idx, meta in enumerate(supplement_meta):
         try:
             file_hash = get_image_hash(meta['path'], hash_method)
             if not file_hash:
-                log_emit(get_text(LANG, 'supp_hash_fail', path=meta['path']))
+                log_emit(tr('supp_hash_fail', path=meta['path']))
                 corrupt_files.append(meta['path'])
                 continue
             
@@ -840,12 +841,12 @@ def supplement_duplicates(main_folder, supplement_folder, report_path, hash_meth
             
             if file_hash in main_hashes:
                 skipped_images.append(file_info)
-                log_emit(get_text(LANG, 'supp_exists', path=meta['path']))
+                log_emit(tr('supp_exists', path=meta['path']))
             else:
                 added_images.append(file_info)
         
         except Exception as e:
-            log_emit(get_text(LANG, 'hash_fail', path=meta['path'], err=e))
+            log_emit(tr('hash_fail', path=meta['path'], err=e))
             corrupt_files.append(meta['path'])
         
         # 🔥 优化进度更新：每个文件都更新进度
@@ -889,7 +890,7 @@ def supplement_duplicates(main_folder, supplement_folder, report_path, hash_meth
         
         if key in main_video_keys:
             skipped_videos.append(video_info)
-            log_emit(get_text(LANG, 'vid_supp_exists', path=meta['path']))
+            log_emit(tr('vid_supp_exists', path=meta['path']))
         else:
             added_videos.append(video_info)
         # 🔥 为视频处理添加进度更新
@@ -924,7 +925,7 @@ def supplement_duplicates(main_folder, supplement_folder, report_path, hash_meth
     # 写报告文件 (保持兼容性)
     _write_supplement_report(report_path, added_images, skipped_images, added_videos, skipped_videos, target_dirs, stats, dry_run, corrupt_files)
     
-    log_emit(get_text(LANG, 'dedup_done', path=report_path))
+    log_emit(tr('dedup_done', path=report_path))
     progress_emit(1.0)  # 最终完成
     
     return {
@@ -976,22 +977,22 @@ def _write_supplement_report(report_path, added_images, skipped_images, added_vi
     """写入增补报告文件"""
     with open(report_path, 'w', encoding='utf-8') as f:
         if dry_run:
-            f.write(get_text(LANG, 'dry_run') + '\n\n')
-        f.write(get_text(LANG, 'supp_report') + '\n\n')
-        f.write(get_text(LANG, 'supp_img_success', count=len(added_images), dir=target_dirs['supplement_dir']) + '\n')
+            f.write(tr('dry_run') + '\n\n')
+        f.write(tr('supp_report') + '\n\n')
+        f.write(tr('supp_img_success', count=len(added_images), dir=target_dirs['supplement_dir']) + '\n')
         
         for img in added_images:
             f.write(f"    {img['path']}\n")
         
-        f.write(get_text(LANG, 'supp_img_exists', count=len(skipped_images)) + '\n')
+        f.write(tr('supp_img_exists', count=len(skipped_images)) + '\n')
         for img in skipped_images:
             f.write(f"    {img['path']}\n")
         
-        f.write(get_text(LANG, 'supp_vid_success', count=len(added_videos), dir=target_dirs['mp4_dir']) + '\n')
+        f.write(tr('supp_vid_success', count=len(added_videos), dir=target_dirs['mp4_dir']) + '\n')
         for vid in added_videos:
             f.write(f"    {vid['path']}\n")
         
-        f.write(get_text(LANG, 'supp_vid_exists', count=len(skipped_videos)) + '\n')
+        f.write(tr('supp_vid_exists', count=len(skipped_videos)) + '\n')
         for vid in skipped_videos:
             f.write(f"    {vid['path']}\n")
         
